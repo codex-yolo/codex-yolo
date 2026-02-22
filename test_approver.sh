@@ -799,6 +799,38 @@ assert_contains "log_error: contains ERROR" "$_out" "ERROR"
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
 
+# log_dir — returns a writable directory
+_test_log_dir_returns_path() {
+    local d
+    d="$(log_dir)"
+    [[ -n "$d" ]] && [[ -d "$d" ]]
+}
+assert_ok "log_dir: returns an existing directory" _test_log_dir_returns_path
+
+_test_log_dir_writable() {
+    local d
+    d="$(log_dir)"
+    touch "$d/.codex-yolo-test-probe" 2>/dev/null && rm -f "$d/.codex-yolo-test-probe"
+}
+assert_ok "log_dir: returned directory is writable" _test_log_dir_writable
+
+# log_dir fallback — when /tmp is not writable, uses ~/.codex-yolo/logs
+_test_log_dir_fallback() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    # Run in a subshell where /tmp probe will fail (override touch via function)
+    local result
+    result="$(HOME="$fake_home" bash -c '
+        touch() { return 1; }
+        export -f touch
+        source "'"$SCRIPT_DIR"'/lib/common.sh"
+        log_dir
+    ' 2>/dev/null)"
+    rm -rf "$fake_home"
+    [[ "$result" == *"/.codex-yolo/logs" ]]
+}
+assert_ok "log_dir: falls back to ~/.codex-yolo/logs when /tmp is not writable" _test_log_dir_fallback
+
 ###############################################################################
 #                  LAUNCHER ARGUMENT PARSING                                  #
 ###############################################################################
@@ -1201,24 +1233,19 @@ PROMPT
 
 assert_ok "Per-session audit: daemon uses 3rd arg as log path" _run_integ_audit_log_arg
 
-# Verify default audit log includes session name
+# Verify default audit log includes session name and uses log_dir
 _check_default_audit_path() {
+    # Source common.sh so log_dir is available, then check the path contains the session name
     local path
-    path="$(SESSION_NAME="codex-yolo-test-123" bash -c '
-        set -euo pipefail
-        SESSION_NAME="codex-yolo-test-123"
-        POLL_INTERVAL=0.3
-        AUDIT_LOG="${3:-/tmp/codex-yolo-${SESSION_NAME}.log}"
-        echo "$AUDIT_LOG"
-    ')"
-    [[ "$path" == "/tmp/codex-yolo-codex-yolo-test-123.log" ]]
+    path="$(source "$SCRIPT_DIR/lib/common.sh"; echo "$(log_dir)/codex-yolo-codex-yolo-test-123.log")"
+    [[ "$path" == *"codex-yolo-codex-yolo-test-123.log" ]]
 }
 
 assert_ok "Per-session audit: default path includes session name" _check_default_audit_path
 
-# Verify launcher generates per-session log path
+# Verify launcher generates per-session log path using log_dir
 _check_launcher_audit_path() {
-    grep -q 'AUDIT_LOG="/tmp/codex-yolo-${SESSION_NAME}.log"' "$SCRIPT_DIR/codex-yolo"
+    grep -q 'AUDIT_LOG="$(log_dir)/codex-yolo-${SESSION_NAME}.log"' "$SCRIPT_DIR/codex-yolo"
 }
 
 assert_ok "Per-session audit: launcher sets AUDIT_LOG from SESSION_NAME" _check_launcher_audit_path

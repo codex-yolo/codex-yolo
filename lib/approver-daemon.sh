@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/common.sh"
 
 SESSION_NAME="${1:?Usage: approver-daemon.sh <session-name> [poll-interval] [audit-log]}"
 POLL_INTERVAL="${2:-0.3}"
-AUDIT_LOG="${3:-/tmp/codex-yolo-${SESSION_NAME}.log}"
+AUDIT_LOG="${3:-$(log_dir)/codex-yolo-${SESSION_NAME}.log}"
 COOLDOWN_SECS=2
 
 # Associative array tracking last-approval timestamp per pane

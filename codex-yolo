@@ -99,7 +99,7 @@ main() {
 
     # Set defaults
     SESSION_NAME="${session_name:-codex-yolo-$(date '+%H%M%S')}"
-    AUDIT_LOG="/tmp/codex-yolo-${SESSION_NAME}.log"
+    AUDIT_LOG="$(log_dir)/codex-yolo-${SESSION_NAME}.log"
     work_dir="${work_dir:-$(pwd)}"
 
     # Validate work_dir
