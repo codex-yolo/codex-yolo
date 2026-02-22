@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# codex-yolo — Launch parallel OpenAI Codex CLI agents with auto-approval via tmux
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+
+SESSION_NAME=""
+AUDIT_LOG=""
+
+usage() {
+    cat <<'EOF'
+Usage: codex-yolo [options] ["task one" "task two" ...]
+
+Launch parallel OpenAI Codex CLI agents in tmux with auto-approval.
+
+Options:
+  -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
+  -d, --dir PATH        Working directory for agents (default: current directory)
+  -m, --model MODEL     Model to use (e.g., o4-mini, o3, gpt-4.1)
+  -p, --poll SECONDS    Approver poll interval (default: 0.3)
+  -f, --file FILE       Read a multiline prompt from a text file
+  -r, --resume          Re-attach to an existing yolo session
+  -h, --help            Show this help
+
+Examples:
+  codex-yolo                     # interactive codex with auto-approval
+  codex-yolo "fix the login bug" "add unit tests for auth"
+  codex-yolo --model o4-mini --dir /my/project "refactor the API layer"
+  codex-yolo --file prompt.txt
+  codex-yolo --resume
+EOF
+}
+
+# Attach or switch to a tmux session, handling nested tmux correctly.
+tmux_attach() {
+    local target="$1"
+    if [[ -n "${TMUX:-}" ]]; then
+        # Already inside tmux — switch the current client to the new session
+        tmux switch-client -t "$target"
+    else
+        tmux attach -t "$target"
+    fi
+}
+
+main() {
+    local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
+    local tasks=()
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -s|--session)  session_name="$2"; shift 2 ;;
+            -d|--dir)      work_dir="$2"; shift 2 ;;
+            -m|--model)    model="$2"; shift 2 ;;
+            -p|--poll)     poll_interval="$2"; shift 2 ;;
+            -f|--file)     prompt_file="$2"; shift 2 ;;
+            -r|--resume)   resume=1; shift ;;
+            -h|--help)     usage; exit 0 ;;
+            -*)            log_error "Unknown option: $1"; usage; exit 1 ;;
+            *)          tasks+=("$1"); shift ;;
+        esac
+    done
+
+    # Check prerequisites
+    check_prereqs || exit 1
+
+    # Handle --resume
+    if (( resume )); then
+        local existing
+        existing="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^codex-yolo-' | head -1)" || true
+        if [[ -z "$existing" ]]; then
+            log_error "No existing yolo session found"
+            exit 1
+        fi
+        log_info "Re-attaching to session: $existing"
+        exec tmux_attach "$existing"
+    fi
+
+    # Read prompt from file if --file was given
+    if [[ -n "$prompt_file" ]]; then
+        if [[ ! -f "$prompt_file" ]]; then
+            log_error "File not found: $prompt_file"
+            exit 1
+        fi
+        local file_content
+        file_content="$(cat "$prompt_file")"
+        if [[ -z "$file_content" ]]; then
+            log_error "File is empty: $prompt_file"
+            exit 1
+        fi
+        tasks+=("$file_content")
+    fi
+
+    # No tasks = launch a single interactive codex session
+    if [[ ${#tasks[@]} -eq 0 ]]; then
+        tasks+=("")
+    fi
+
+    # Set defaults
+    SESSION_NAME="${session_name:-codex-yolo-$(date '+%H%M%S')}"
+    AUDIT_LOG="/tmp/codex-yolo-${SESSION_NAME}.log"
+    work_dir="${work_dir:-$(pwd)}"
+
+    # Validate work_dir
+    if [[ ! -d "$work_dir" ]]; then
+        log_error "Working directory does not exist: $work_dir"
+        exit 1
+    fi
+
+    # Resolve to absolute path
+    work_dir="$(cd "$work_dir" && pwd)"
+
+    # Ensure Codex CLI config directory exists
+    ensure_codex_config
+
+    # Truncate audit log for this run
+    : > "$AUDIT_LOG"
+
+    log_info "Creating tmux session: $SESSION_NAME"
+    log_info "Working directory: $work_dir"
+    log_info "Tasks: ${#tasks[@]}"
+
+    # Create detached tmux session with first agent window
+    local first_task="${tasks[0]}"
+    local cmd
+    cmd="$(build_agent_cmd "$model" "$first_task")"
+
+    tmux new-session -d -s "$SESSION_NAME" -n "agent-1" -c "$work_dir"
+    tmux send-keys -t "$SESSION_NAME:agent-1" "$cmd" C-m
+
+    log_info "Started agent-1: ${first_task:+${first_task:0:60}...}${first_task:-interactive}"
+
+    # Create additional agent windows
+    local i
+    for (( i=1; i<${#tasks[@]}; i++ )); do
+        local win_name="agent-$((i+1))"
+        local task="${tasks[$i]}"
+        cmd="$(build_agent_cmd "$model" "$task")"
+
+        tmux new-window -t "$SESSION_NAME" -n "$win_name" -c "$work_dir"
+        tmux send-keys -t "$SESSION_NAME:$win_name" "$cmd" C-m
+
+        log_info "Started $win_name: ${task:+${task:0:60}...}${task:-interactive}"
+    done
+
+    # Start approver daemon in background (fully detached from this process).
+    # The daemon self-terminates when the tmux session is gone.
+    log_info "Starting approver daemon (poll=${poll_interval}s)"
+    nohup bash "$SCRIPT_DIR/lib/approver-daemon.sh" "$SESSION_NAME" "$poll_interval" "$AUDIT_LOG" \
+        >/dev/null 2>&1 &
+    disown
+
+    # Create control window tailing the audit log
+    tmux new-window -t "$SESSION_NAME" -n "control" -c "$work_dir"
+    tmux send-keys -t "$SESSION_NAME:control" "tail -f $AUDIT_LOG" C-m
+
+    # Select the first agent window
+    tmux select-window -t "$SESSION_NAME:agent-1"
+
+    log_info "Attaching to session (Ctrl-b n/p to switch windows, Ctrl-b d to detach)"
+    log_info "Audit log: $AUDIT_LOG"
+
+    # Attach (or switch if already inside tmux)
+    tmux_attach "$SESSION_NAME"
+}
+
+build_agent_cmd() {
+    local model="$1" task="$2"
+    local cmd="codex"
+
+    if [[ -n "$model" ]]; then
+        cmd="$cmd --model $model"
+    fi
+
+    # No task = interactive mode
+    if [[ -z "$task" ]]; then
+        echo "$cmd"
+        return
+    fi
+
+    # For multiline prompts, write to a temp file and pipe into codex.
+    # This avoids shell quoting issues with tmux send-keys.
+    if [[ "$task" == *$'\n'* ]]; then
+        local tmpfile
+        tmpfile="/tmp/codex-yolo-prompt-$RANDOM$RANDOM.txt"
+        printf '%s' "$task" > "$tmpfile"
+        echo "cat '$tmpfile' | $cmd"
+        return
+    fi
+
+    # Escape single quotes in the task for shell safety
+    local escaped_task="${task//\'/\'\\\'\'}"
+    cmd="$cmd '$escaped_task'"
+
+    echo "$cmd"
+}
+
+main "$@"
