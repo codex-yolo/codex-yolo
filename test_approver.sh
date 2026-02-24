@@ -1422,6 +1422,211 @@ assert_ok  "Concurrent: no crosstalk — daemon B ignores session A prompt" _run
 assert_ok  "Concurrent: each log only references its own session" _run_integ_concurrent_session_in_log
 
 ###############################################################################
+#              DAEMON RESILIENCE — survives transient errors                  #
+###############################################################################
+
+section "Daemon resilience — survives errors and keeps approving"
+
+# The daemon must survive transient errors (unwritable audit log, disappearing
+# panes, etc.) and continue approving prompts. Previously it used set -euo
+# pipefail which killed it silently on any unhandled error.
+
+_RESIL_SESSION="codex-yolo-resil-$$"
+_resil_cleanup() {
+    tmux kill-session -t "$_RESIL_SESSION" 2>/dev/null || true
+    sleep 0.2
+}
+
+# Test: daemon survives when audit log becomes unwritable mid-run, then
+# still approves prompts once log is writable again.
+_run_resil_unwritable_log() {
+    _resil_cleanup
+    local audit_tmp audit_dir
+    audit_dir="$(mktemp -d)"
+    audit_tmp="$audit_dir/audit.log"
+
+    tmux new-session -d -s "$_RESIL_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    # First prompt — daemon writes to writable log
+    tmux send-keys -t "$_RESIL_SESSION:test" "$(cat <<'PROMPT'
+  Would you like to run the following command?
+  ls /tmp
+  Yes, just this once
+  No, and tell Codex what to do differently
+PROMPT
+)" ""
+    sleep 0.2
+
+    # Start daemon in background
+    bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_RESIL_SESSION" 0.2 "$audit_tmp" 2>/dev/null &
+    local daemon_pid=$!
+    sleep 1
+
+    # Daemon should have approved first prompt
+    local first_result
+    first_result="$(cat "$audit_tmp" 2>/dev/null)"
+
+    # Make log unwritable
+    chmod 000 "$audit_dir" 2>/dev/null || true
+
+    # Inject a second prompt — daemon must survive the log write failure
+    tmux send-keys -t "$_RESIL_SESSION:test" "$(cat <<'PROMPT'
+  Would you like to run the following command?
+  git status
+  Yes, just this once
+  No, and tell Codex what to do differently
+PROMPT
+)" ""
+    sleep 1.5
+
+    # Check daemon is still alive
+    local daemon_alive=0
+    kill -0 "$daemon_pid" 2>/dev/null && daemon_alive=1
+
+    # Restore permissions and clean up
+    chmod 755 "$audit_dir" 2>/dev/null || true
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -rf "$audit_dir"
+    _resil_cleanup
+
+    # Both conditions must hold:
+    # 1. First prompt was approved (log has APPROVED)
+    # 2. Daemon was still alive after log write failure
+    [[ "$first_result" == *"APPROVED"* ]] && (( daemon_alive ))
+}
+
+# Test: daemon survives when a pane disappears mid-iteration.
+_run_resil_pane_disappears() {
+    _resil_cleanup
+    local audit_tmp
+    audit_tmp="$(mktemp)"
+
+    # Create session with two windows
+    tmux new-session -d -s "$_RESIL_SESSION" -n "test1" "cat"
+    tmux new-window -t "$_RESIL_SESSION" -n "test2" "cat"
+    sleep 0.3
+
+    # Inject prompt in window 1
+    tmux send-keys -t "$_RESIL_SESSION:test1" "$(cat <<'PROMPT'
+  Would you like to run the following command?
+  ls /tmp
+  Yes, just this once
+  No, and tell Codex what to do differently
+PROMPT
+)" ""
+    sleep 0.2
+
+    # Start daemon
+    bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_RESIL_SESSION" 0.2 "$audit_tmp" 2>/dev/null &
+    local daemon_pid=$!
+    sleep 1
+
+    # Kill window 2 (pane disappears while daemon is iterating over panes)
+    tmux kill-window -t "$_RESIL_SESSION:test2" 2>/dev/null || true
+    sleep 0.5
+
+    # Inject another prompt in window 1
+    tmux send-keys -t "$_RESIL_SESSION:test1" "$(cat <<'PROMPT'
+  Would you like to make the following edits?
+  src/main.py
+  Yes, just this once
+  No, and tell Codex what to do differently
+PROMPT
+)" ""
+    sleep 1.5
+
+    local result daemon_alive=0
+    kill -0 "$daemon_pid" 2>/dev/null && daemon_alive=1
+    result="$(cat "$audit_tmp")"
+
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -f "$audit_tmp"
+    _resil_cleanup
+
+    # Daemon must still be alive and have approved prompts
+    (( daemon_alive )) && [[ "$result" == *"APPROVED"* ]]
+}
+
+# Test: daemon logs its own exit (EXIT trap works).
+_run_resil_exit_logged() {
+    _resil_cleanup
+    local audit_tmp
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_RESIL_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    # Run daemon briefly, then kill it
+    bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_RESIL_SESSION" 0.2 "$audit_tmp" 2>/dev/null &
+    local daemon_pid=$!
+    sleep 0.5
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+
+    local result
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp"
+    _resil_cleanup
+
+    # The EXIT trap should have logged the daemon exit
+    [[ "$result" == *"Daemon exited"* ]]
+}
+
+# Test: daemon keeps approving after many rapid iterations without crashing.
+_run_resil_rapid_prompts() {
+    _resil_cleanup
+    local audit_tmp
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_RESIL_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    # Start daemon with very fast poll
+    bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_RESIL_SESSION" 0.1 "$audit_tmp" 2>/dev/null &
+    local daemon_pid=$!
+
+    # Inject 3 prompts rapidly
+    local i
+    for i in 1 2 3; do
+        tmux send-keys -t "$_RESIL_SESSION:test" "$(cat <<PROMPT
+  Would you like to run the following command?
+  command-$i
+  Yes, just this once
+  No, and tell Codex what to do differently
+PROMPT
+)" ""
+        sleep 1
+    done
+
+    local daemon_alive=0
+    kill -0 "$daemon_pid" 2>/dev/null && daemon_alive=1
+    local result
+    result="$(cat "$audit_tmp")"
+
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -f "$audit_tmp"
+    _resil_cleanup
+
+    # Count APPROVED lines — should have at least 2
+    local count
+    count="$(echo "$result" | grep -c "APPROVED" || true)"
+    (( daemon_alive )) && (( count >= 2 ))
+}
+
+assert_ok "Resilience: daemon survives unwritable audit log" _run_resil_unwritable_log
+assert_ok "Resilience: daemon survives disappearing pane" _run_resil_pane_disappears
+assert_ok "Resilience: daemon logs its own exit via EXIT trap" _run_resil_exit_logged
+assert_ok "Resilience: daemon handles rapid sequential prompts" _run_resil_rapid_prompts
+
+###############################################################################
 #                          SUMMARY                                            #
 ###############################################################################
 

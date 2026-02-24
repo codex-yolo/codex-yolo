@@ -4,7 +4,7 @@
 # Usage: approver-daemon.sh <session-name> [poll-interval] [audit-log]
 # Discovers all panes in the given tmux session and monitors them.
 
-set -euo pipefail
+set -u  # Catch unset variables, but NO set -e (daemon must survive transient errors)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
@@ -17,12 +17,15 @@ COOLDOWN_SECS=2
 # Associative array tracking last-approval timestamp per pane
 declare -A LAST_APPROVED
 
+# Log daemon exit for debugging (catches crashes, signals, etc.)
+trap '_exit_code=$?; echo "[$(date "+%Y-%m-%d %H:%M:%S")] Daemon exited (code=$_exit_code, session=$SESSION_NAME)" >> "$AUDIT_LOG" 2>/dev/null; log_warn "Approver daemon exiting (code=$_exit_code)" 2>/dev/null' EXIT
+
 audit() {
     local pane="$1" pattern="$2"
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[$ts] APPROVED pane=$pane pattern=\"$pattern\"" >> "$AUDIT_LOG"
-    log_info "Auto-approved: pane=$pane pattern=\"$pattern\""
+    echo "[$ts] APPROVED pane=$pane pattern=\"$pattern\"" >> "$AUDIT_LOG" 2>/dev/null || true
+    log_info "Auto-approved: pane=$pane pattern=\"$pattern\"" 2>/dev/null || true
 }
 
 # Check if a pane is in cooldown
