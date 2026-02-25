@@ -94,6 +94,7 @@ fi
 # -------------------------------------------------------------------
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing installation in $INSTALL_DIR"
+    git -C "$INSTALL_DIR" checkout . 2>/dev/null
     git -C "$INSTALL_DIR" pull --ff-only || error "Failed to update. Resolve manually in $INSTALL_DIR"
 else
     if [[ -d "$INSTALL_DIR" ]]; then
