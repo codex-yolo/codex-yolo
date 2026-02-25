@@ -100,6 +100,25 @@ detect_prompt() {
     return 1
 }
 
+# Detect if the slash command autocomplete picker is visible.
+# When the user types "/p" (or similar), Codex CLI shows an autocomplete popup
+# with lines like:  /plan    Switch to plan mode and optionally send a prompt
+# This can contribute false secondary signals (e.g. "/permissions" contains "permission").
+# If 2+ such lines appear in the tail, veto any approval to avoid selecting autocomplete items.
+detect_slash_picker() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 15)"
+
+    # Count lines matching slash command autocomplete format:
+    #   /command-name    Description text
+    # Optional ❯ selection marker before the /command.
+    local count
+    count="$(echo "$tail_content" | grep -cE '^\s*(❯\s*)?/[a-z][-a-z]+\s{2,}' 2>/dev/null)" || count=0
+
+    (( count >= 2 ))
+}
+
 # Detect Codex CLI's MCP elicitation prompts (information requests).
 # Pattern: "Yes, provide the requested info" / "No, but continue without it"
 detect_elicitation() {
@@ -145,6 +164,11 @@ main_loop() {
 
             # Skip empty panes
             [[ -z "$content" ]] && continue
+
+            # Veto: slash command autocomplete picker is visible — do not send any keys
+            if detect_slash_picker "$content"; then
+                continue
+            fi
 
             # Detect permission prompt
             local pattern

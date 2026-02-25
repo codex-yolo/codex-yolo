@@ -88,7 +88,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^build_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -576,6 +576,198 @@ PANE
 )"
 
 ###############################################################################
+#              SLASH COMMAND PICKER DETECTION (detect_slash_picker)            #
+###############################################################################
+
+section "detect_slash_picker — positive detection"
+
+# /p prefix: shows /plan, /permissions, /personality etc.
+assert_ok "Slash picker: /p prefix autocomplete" \
+    detect_slash_picker "$(cat <<'PANE'
+  Some conversation text above...
+  Codex is working on the task.
+
+  ❯ /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+    /personality    Choose a communication style for responses
+PANE
+)"
+
+# /c prefix: shows /compact, /changelog etc.
+assert_ok "Slash picker: /c prefix autocomplete" \
+    detect_slash_picker "$(cat <<'PANE'
+  Previous output here.
+
+    /compact        Summarize conversation to free tokens
+    /diff           Show the Git diff including untracked files
+    /model          Choose the active model and reasoning effort
+PANE
+)"
+
+# Highlighted ❯ selection marker on a different item
+assert_ok "Slash picker: highlighted selection marker" \
+    detect_slash_picker "$(cat <<'PANE'
+  Working on your request...
+
+    /feedback       Submit logs to Codex maintainers
+  ❯ /init           Generate an AGENTS.md scaffold in the current directory
+    /mcp            List configured Model Context Protocol tools
+PANE
+)"
+
+# Full command list (many items)
+assert_ok "Slash picker: full command list" \
+    detect_slash_picker "$(cat <<'PANE'
+    /agent            Switch the active agent thread
+    /apps             Browse apps and insert them into your prompt
+    /compact          Summarize conversation to free tokens
+    /diff             Show the Git diff including untracked files
+    /experimental     Toggle optional experimental features
+    /feedback         Submit logs to Codex maintainers
+    /init             Generate an AGENTS.md scaffold
+    /model            Choose the active model and reasoning effort
+    /permissions      Set what Codex can do without asking first
+    /plan             Switch to plan mode
+    /review           Ask Codex to review your working tree
+    /status           Display session configuration and token usage
+PANE
+)"
+
+# Picker visible with stale conversation context above (the real false-positive scenario)
+assert_ok "Slash picker: picker with stale context above" \
+    detect_slash_picker "$(cat <<'PANE'
+  Would you like to run the following command?
+  ls /tmp
+  Yes, just this once
+  (approved earlier)
+
+  ❯ /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+    /personality    Choose a communication style for responses
+PANE
+)"
+
+section "detect_slash_picker — false positive resistance"
+
+# Normal permission prompt — no slash picker
+assert_fail "Slash picker FP: normal permission prompt" \
+    detect_slash_picker "$(cat <<'PANE'
+  Would you like to run the following command?
+  ls -la /tmp
+  Yes, just this once
+  No, and tell Codex what to do differently
+PANE
+)"
+
+# File paths that start with / but aren't slash commands
+assert_fail "Slash picker FP: file paths with slashes" \
+    detect_slash_picker "$(cat <<'PANE'
+  Reading /home/user/project/src/main.rs
+  Writing /tmp/output.log
+  /var/log/syslog checked
+PANE
+)"
+
+# Single slash command mention in conversation (below threshold of 2)
+assert_fail "Slash picker FP: single slash mention" \
+    detect_slash_picker "$(cat <<'PANE'
+  You can use /status to see token usage.
+  Let me know if you need anything else.
+PANE
+)"
+
+# Code output with /path patterns
+assert_fail "Slash picker FP: code with path patterns" \
+    detect_slash_picker "$(cat <<'PANE'
+  import { readFile } from 'fs';
+  const path = '/api/users/list';
+  fetch('/api/data/query');
+PANE
+)"
+
+# Inline discussion mentioning commands without picker format (no 2+ space gap)
+assert_fail "Slash picker FP: inline discussion of commands" \
+    detect_slash_picker "$(cat <<'PANE'
+  Try using /plan to enter plan mode. The /model command
+  will let you choose a model. You can also use /status.
+PANE
+)"
+
+# Empty content
+assert_fail "Slash picker FP: empty content" \
+    detect_slash_picker ""
+
+# Yes/No prompt without picker
+assert_fail "Slash picker FP: Yes/No prompt" \
+    detect_slash_picker "$(cat <<'PANE'
+ Would you like to run the following command?
+   ls /home/user/git/codex_yolo/
+ Do you want to proceed?
+ > 1. Yes, just this once
+   2. No, and tell Codex what to do differently
+PANE
+)"
+
+section "detect_slash_picker — combined veto scenarios"
+
+# Slash picker should veto even when stale approval options are in the window
+_test_picker_vetoes_stale_approval() {
+    local content
+    content="$(cat <<'PANE'
+  Would you like to run the following command?
+  ls /tmp
+  Yes, just this once
+  No, and tell Codex what to do differently
+
+  ❯ /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+    /personality    Choose a communication style for responses
+PANE
+)"
+    # Picker is detected (would veto)
+    detect_slash_picker "$content" || return 1
+    # Prompt is also detected (stale signal)
+    detect_prompt "$content" >/dev/null || true
+    return 0
+}
+assert_ok "Combined: slash picker vetoes stale approval prompt" _test_picker_vetoes_stale_approval
+
+# Real prompt without picker should still work
+_test_real_prompt_no_picker() {
+    local content
+    content="$(cat <<'PANE'
+  Would you like to run the following command?
+  git status
+  Yes, just this once
+  No, and tell Codex what to do differently
+PANE
+)"
+    # No picker detected
+    if detect_slash_picker "$content"; then
+        return 1
+    fi
+    # Prompt is detected
+    detect_prompt "$content" >/dev/null
+}
+assert_ok "Combined: real prompt without picker still detected" _test_real_prompt_no_picker
+
+# Slash picker should veto even when stale elicitation is in the window
+_test_picker_vetoes_stale_elicitation() {
+    local content
+    content="$(cat <<'PANE'
+  Yes, provide the requested info
+  No, but continue without it
+
+    /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+PANE
+)"
+    detect_slash_picker "$content" || return 1
+    return 0
+}
+assert_ok "Combined: slash picker vetoes stale elicitation" _test_picker_vetoes_stale_elicitation
+
+###############################################################################
 #                   PATTERN OUTPUT VALUES                                      #
 ###############################################################################
 
@@ -1025,7 +1217,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -1062,7 +1254,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -1100,7 +1292,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -1136,7 +1328,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -1173,7 +1365,7 @@ OUTPUT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -1196,6 +1388,54 @@ assert_ok  "Integration: file edit prompt detected and approved" _run_integ_edit
 assert_ok  "Integration: tool call prompt detected and approved" _run_integ_tool
 assert_ok  "Integration: trust directory prompt detected and approved" _run_integ_trust
 assert_ok  "Integration: no false positive on normal output" _run_integ_no_false_positive
+
+# ── Integration: Slash picker veto ────────────────────────────────────────────
+
+# Stale approval prompt + slash picker visible → daemon must NOT approve.
+_run_integ_slash_picker_veto() {
+    _integ_cleanup
+    local audit_tmp
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    # Inject stale approval prompt from earlier conversation + slash picker at bottom
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(cat <<'PANE'
+  Would you like to run the following command?
+  ls /tmp
+  Yes, just this once
+  No, and tell Codex what to do differently
+
+  ❯ /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+    /personality    Choose a communication style for responses
+PANE
+)" ""
+    sleep 0.2
+
+    AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
+        timeout 1.5 bash -c '
+            source "'"$SCRIPT_DIR"'/lib/common.sh"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            AUDIT_LOG="'"$audit_tmp"'"
+            SESSION_NAME="'"$_INTEG_SESSION"'"
+            POLL_INTERVAL=0.2
+            COOLDOWN_SECS=2
+            declare -A LAST_APPROVED
+            main_loop
+        ' 2>/dev/null || true
+
+    local result
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp"
+    _integ_cleanup
+
+    # Must NOT contain any approvals — the slash picker should veto
+    [[ "$result" != *"APPROVED"* ]]
+}
+
+assert_ok "Integration Slash Picker: veto prevents approval when picker visible" _run_integ_slash_picker_veto
 
 # ── Per-session audit log ────────────────────────────────────────────────────
 
