@@ -1042,21 +1042,30 @@ assert_fail "launcher: -d nonexistent path fails" \
 assert_fail "launcher: -f nonexistent file fails" \
     bash "$SCRIPT_DIR/codex-yolo" -f /nonexistent/file.txt
 
-# No args = interactive mode (creates a tmux session, so we need cleanup)
+# No args = interactive mode (creates a tmux session, so we need cleanup).
+# The launcher's final step is "tmux attach" which requires a real TTY.
+# In CI (no TTY) this fails with "open terminal failed: not a terminal".
+# So instead of checking the exit code, verify the session was actually created.
 _test_no_args() {
     local before
     before="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
     # Unset TMUX so the launcher uses "tmux attach" (which harmlessly fails
     # when stdout is redirected) instead of "tmux switch-client" (which would
     # yank the user's current tmux client to the new session).
-    env -u TMUX bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1
-    local rc=$?
-    # Kill any new codex-yolo-* sessions created during the test
+    env -u TMUX bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1 || true
+    # Check that a new codex-yolo-* session was created
+    local after found=0
+    after="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
     local s
+    for s in $(comm -13 <(echo "$before") <(echo "$after") | grep '^codex-yolo-' || true); do
+        found=1
+        tmux kill-session -t "$s" 2>/dev/null || true
+    done
+    # Also clean up any stragglers
     for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^codex-yolo-' || true); do
         echo "$before" | grep -qxF "$s" || tmux kill-session -t "$s" 2>/dev/null || true
     done
-    return $rc
+    (( found ))
 }
 assert_ok "launcher: no arguments launches interactive mode" _test_no_args
 
