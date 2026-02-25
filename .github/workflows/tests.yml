@@ -15,5 +15,10 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
 
+      - name: Create codex CLI stub
+        run: |
+          printf '#!/bin/sh\necho "codex stub"\n' | sudo tee /usr/local/bin/codex >/dev/null
+          sudo chmod +x /usr/local/bin/codex
+
       - name: Run tests
         run: bash test_approver.sh -v

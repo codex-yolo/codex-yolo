@@ -1046,7 +1046,10 @@ assert_fail "launcher: -f nonexistent file fails" \
 _test_no_args() {
     local before
     before="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
-    bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1
+    # Unset TMUX so the launcher uses "tmux attach" (which harmlessly fails
+    # when stdout is redirected) instead of "tmux switch-client" (which would
+    # yank the user's current tmux client to the new session).
+    env -u TMUX bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1
     local rc=$?
     # Kill any new codex-yolo-* sessions created during the test
     local s
