@@ -53,6 +53,8 @@ in_cooldown() {
 #          with "Yes, continue anyway" / "Go back"
 #   Style F (network/host): "Allow Codex to" with host access
 #          with "Yes, just this once" / "Yes, and allow this host"
+#   Style G (proceed): "Would you like to run the following command?"
+#          with "Yes, proceed (y)" / "No, and tell Codex what to do differently (esc)"
 #
 # All styles use a TUI selection list navigated with arrows, confirmed with Enter.
 # The first option (approval) is pre-selected by default.
@@ -70,7 +72,7 @@ detect_prompt() {
     fi
 
     # Secondary signal 1: Approval option text
-    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
+    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, continue|Yes, and don.t ask|Yes, proceed|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
         has_approval_option=1
     fi
 
