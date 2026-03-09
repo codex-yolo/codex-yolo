@@ -112,9 +112,16 @@ if ! command -v codex &>/dev/null; then
         fi
         # Codex CLI ships native binaries as npm-aliased optional deps, e.g.
         #   "@openai/codex-linux-arm64": "npm:@openai/codex@0.112.0-linux-arm64"
-        # Termux reports os as "android", so npm skips the linux optional dep.
-        # We install the main package first, then manually download and extract
-        # the platform tarball into the global node_modules.
+        # Two problems on Termux:
+        #   1. npm skips the optional dep because os is "android" not "linux"
+        #   2. The musl-static binary is ET_EXEC (fixed-address), which
+        #      Android's linker rejects (requires ET_DYN / PIE)
+        # Fix: install the platform tarball manually, then use proot to run
+        # the binary (proot intercepts execve and handles ET_EXEC binaries).
+        if ! command -v proot &>/dev/null; then
+            info "proot is required to run Codex on Termux — installing"
+            pkg install -y proot
+        fi
         npm install -g @openai/codex || error "Failed to install Codex CLI"
         NPM_GLOBAL="$(npm root -g)"
         CODEX_VER="$(node -e "import('$NPM_GLOBAL/@openai/codex/package.json',{with:{type:'json'}}).then(m=>console.log(m.default.version))")"
@@ -132,6 +139,20 @@ if ! command -v codex &>/dev/null; then
                 || error "Failed to download platform binary"
             info "Platform binary installed successfully"
         fi
+        # Create a wrapper that launches codex under proot so the ET_EXEC
+        # binary can run on Android.
+        CODEX_JS="$NPM_GLOBAL/@openai/codex/bin/codex.js"
+        WRAPPER="$NPM_GLOBAL/@openai/codex/bin/codex-termux-wrapper.sh"
+        cat > "$WRAPPER" << 'WRAPPER_EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+# Wrapper: run codex under proot on Termux
+exec proot node "$(dirname "$0")/codex.js" "$@"
+WRAPPER_EOF
+        chmod +x "$WRAPPER"
+        # Point the global bin symlink at the wrapper instead of codex.js
+        CODEX_BIN_LINK="$(npm bin -g)/codex"
+        ln -sf "$WRAPPER" "$CODEX_BIN_LINK"
+        info "Configured codex to run under proot"
     else
         if ! command -v npm &>/dev/null; then
             error "npm is required to install Codex CLI. Install Node.js/npm first: https://nodejs.org"
