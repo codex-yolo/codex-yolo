@@ -25,16 +25,18 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 
 ## Installation
 
-**One-liner** (macOS, Linux, WSL):
+**One-liner** (macOS, Linux, WSL, Termux):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
 ```
 
-This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. It also installs `tmux` and `codex` (Codex CLI via npm) if they are missing. Override the install location with `CODEX_YOLO_HOME`:
+> For **zsh** users: replace `~/.bashrc` with `~/.zshrc`
+
+This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. It also installs `git`, `tmux`, and `codex` (Codex CLI via npm) if they are missing. Override the install location with `CODEX_YOLO_HOME`:
 
 ```bash
-CODEX_YOLO_HOME=~/my/path curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash
+CODEX_YOLO_HOME=~/my/path curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
 ```
 
 **Manual install:**
