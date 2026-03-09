@@ -110,20 +110,23 @@ if ! command -v codex &>/dev/null; then
             info "npm is not installed — installing via pkg"
             pkg install -y nodejs
         fi
-        # Codex CLI ships platform-specific native binaries as optional deps.
-        # On Termux the standard linux-arm64 binary fails under Android's
-        # linker, so npm silently skips it.  We must patch the launcher to
-        # avoid the hard "Missing optional dependency" throw at startup.
-        npm install -g @openai/codex || error "Failed to install Codex CLI"
-        # Locate the installed entrypoint and patch out the native-binary check
-        CODEX_BIN="$(npm root -g)/@openai/codex/bin/codex.js"
-        if [[ -f "$CODEX_BIN" ]]; then
-            # The launcher throws when the platform package is missing.
-            # Replace the throw with a no-op so the pure-JS fallback is used.
-            if grep -q 'throw new Error.*Missing optional dependency' "$CODEX_BIN" 2>/dev/null; then
-                sed -i 's/throw new Error.*Missing optional dependency[^)]*)/\/\/ patched for Termux: native binary unavailable/' "$CODEX_BIN"
-                info "Patched Codex CLI for Termux compatibility"
-            fi
+        # Codex CLI is a thin JS launcher that spawns a native binary from a
+        # platform-specific optional dep (e.g. @openai/codex-linux-arm64).
+        # On Termux, npm skips that package because its os field says "linux"
+        # while Termux reports "android".  We explicitly install the platform
+        # package so the native binary is available.  The musl-static binary
+        # works under Android's kernel.
+        CODEX_ARCH="$(uname -m)"
+        case "$CODEX_ARCH" in
+            aarch64|arm64) CODEX_PLATFORM_PKG="@openai/codex-linux-arm64" ;;
+            x86_64)        CODEX_PLATFORM_PKG="@openai/codex-linux-x64" ;;
+            *)             CODEX_PLATFORM_PKG="" ;;
+        esac
+        if [[ -n "$CODEX_PLATFORM_PKG" ]]; then
+            npm install -g @openai/codex "$CODEX_PLATFORM_PKG" || error "Failed to install Codex CLI"
+        else
+            warn "Unsupported architecture $CODEX_ARCH — trying install without platform binary"
+            npm install -g @openai/codex || error "Failed to install Codex CLI"
         fi
     else
         if ! command -v npm &>/dev/null; then
