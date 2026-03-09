@@ -110,12 +110,27 @@ if ! command -v codex &>/dev/null; then
             info "npm is not installed — installing via pkg"
             pkg install -y nodejs
         fi
+        # Codex CLI ships platform-specific native binaries as optional deps.
+        # On Termux the standard linux-arm64 binary fails under Android's
+        # linker, so npm silently skips it.  We must patch the launcher to
+        # avoid the hard "Missing optional dependency" throw at startup.
+        npm install -g @openai/codex || error "Failed to install Codex CLI"
+        # Locate the installed entrypoint and patch out the native-binary check
+        CODEX_BIN="$(npm root -g)/@openai/codex/bin/codex.js"
+        if [[ -f "$CODEX_BIN" ]]; then
+            # The launcher throws when the platform package is missing.
+            # Replace the throw with a no-op so the pure-JS fallback is used.
+            if grep -q 'throw new Error.*Missing optional dependency' "$CODEX_BIN" 2>/dev/null; then
+                sed -i 's/throw new Error.*Missing optional dependency[^)]*)/\/\/ patched for Termux: native binary unavailable/' "$CODEX_BIN"
+                info "Patched Codex CLI for Termux compatibility"
+            fi
+        fi
     else
         if ! command -v npm &>/dev/null; then
             error "npm is required to install Codex CLI. Install Node.js/npm first: https://nodejs.org"
         fi
+        npm install -g @openai/codex || error "Failed to install Codex CLI"
     fi
-    npm install -g @openai/codex || error "Failed to install Codex CLI"
     command -v codex &>/dev/null || warn "Codex CLI installed but not found in PATH — you may need to restart your shell"
 fi
 
