@@ -110,15 +110,28 @@ if ! command -v codex &>/dev/null; then
             info "npm is not installed — installing via pkg"
             pkg install -y nodejs
         fi
-        # Codex CLI ships native binaries as optional deps with os:["linux"].
-        # Termux reports os as "android", so npm silently skips them.
-        # Override with --os=linux --cpu=<arch> to force the install.
+        # Codex CLI ships native binaries as npm-aliased optional deps, e.g.
+        #   "@openai/codex-linux-arm64": "npm:@openai/codex@0.112.0-linux-arm64"
+        # Termux reports os as "android", so npm skips the linux optional dep.
+        # We install the main package first, then manually download and extract
+        # the platform tarball into the global node_modules.
+        npm install -g @openai/codex || error "Failed to install Codex CLI"
+        NPM_GLOBAL="$(npm root -g)"
+        CODEX_VER="$(node -e "import('$NPM_GLOBAL/@openai/codex/package.json',{with:{type:'json'}}).then(m=>console.log(m.default.version))")"
         CODEX_CPU="$(uname -m)"
         case "$CODEX_CPU" in
             aarch64|arm64) CODEX_CPU="arm64" ;;
             x86_64)        CODEX_CPU="x64" ;;
         esac
-        npm install -g @openai/codex --os=linux --cpu="$CODEX_CPU" || error "Failed to install Codex CLI"
+        PLATFORM_DIR="$NPM_GLOBAL/@openai/codex-linux-${CODEX_CPU}"
+        if [[ ! -d "$PLATFORM_DIR" ]]; then
+            info "Installing platform binary (codex@${CODEX_VER}-linux-${CODEX_CPU})"
+            mkdir -p "$PLATFORM_DIR"
+            curl -fsSL "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VER}-linux-${CODEX_CPU}.tgz" \
+                | tar xz -C "$PLATFORM_DIR" --strip-components=1 \
+                || error "Failed to download platform binary"
+            info "Platform binary installed successfully"
+        fi
     else
         if ! command -v npm &>/dev/null; then
             error "npm is required to install Codex CLI. Install Node.js/npm first: https://nodejs.org"
