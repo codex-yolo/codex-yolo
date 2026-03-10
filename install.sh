@@ -116,12 +116,9 @@ if ! command -v codex &>/dev/null; then
         #   1. npm skips the optional dep because os is "android" not "linux"
         #   2. The musl-static binary is ET_EXEC (fixed-address), which
         #      Android's linker rejects (requires ET_DYN / PIE)
-        # Fix: install the platform tarball manually, then use proot to run
-        # the binary (proot intercepts execve and handles ET_EXEC binaries).
-        if ! command -v proot &>/dev/null; then
-            info "proot is required to run Codex on Termux — installing"
-            pkg install -y proot
-        fi
+        # Fix: install the platform tarball manually, then patch the binary's
+        # ELF e_type from ET_EXEC (2) to ET_DYN (3). musl/Rust static binaries
+        # are position-independent so this one-byte patch is safe.
         npm install -g @openai/codex || error "Failed to install Codex CLI"
         NPM_GLOBAL="$(npm root -g)"
         CODEX_VER="$(node -e "import('$NPM_GLOBAL/@openai/codex/package.json',{with:{type:'json'}}).then(m=>console.log(m.default.version))")"
@@ -139,20 +136,6 @@ if ! command -v codex &>/dev/null; then
                 || error "Failed to download platform binary"
             info "Platform binary installed successfully"
         fi
-        # Create a wrapper that launches codex under proot so the ET_EXEC
-        # binary can run on Android.
-        CODEX_JS="$NPM_GLOBAL/@openai/codex/bin/codex.js"
-        WRAPPER="$NPM_GLOBAL/@openai/codex/bin/codex-termux-wrapper.sh"
-        cat > "$WRAPPER" << 'WRAPPER_EOF'
-#!/data/data/com.termux/files/usr/bin/bash
-# Wrapper: run codex under proot on Termux
-exec proot node "$(dirname "$0")/codex.js" "$@"
-WRAPPER_EOF
-        chmod +x "$WRAPPER"
-        # Point the global bin symlink at the wrapper instead of codex.js
-        CODEX_BIN_LINK="$(npm bin -g)/codex"
-        ln -sf "$WRAPPER" "$CODEX_BIN_LINK"
-        info "Configured codex to run under proot"
     else
         if ! command -v npm &>/dev/null; then
             error "npm is required to install Codex CLI. Install Node.js/npm first: https://nodejs.org"
@@ -160,6 +143,246 @@ WRAPPER_EOF
         npm install -g @openai/codex || error "Failed to install Codex CLI"
     fi
     command -v codex &>/dev/null || warn "Codex CLI installed but not found in PATH — you may need to restart your shell"
+fi
+
+# -------------------------------------------------------------------
+# Termux: patch codex.real with synthetic RELA relocations so
+# linker64 can load it correctly.  Runs unconditionally so it also
+# re-applies after updates.
+#
+# Why linker64?
+# termux-exec (LD_PRELOAD) rewrites every execve(2) as
+#   execve("/system/bin/linker64", [argv0, binary, ...args])
+# The kernel sees the trusted system linker being launched; linker64
+# then mmaps the target binary.  Bypassing termux-exec (OPTOUT env
+# var, two-hop trick, etc.) makes the kernel's W^X/SELinux policy
+# block the execve — the only path to execution is through linker64.
+#
+# What linker64 requires
+# 1. e_type == ET_DYN                  → patch byte at offset 16
+# 2. PT_DYNAMIC program-header entry  → repurpose PT_GNU_STACK slot
+# 3. .dynamic section readable in a   → extend last PT_LOAD to cover
+#    loaded PT_LOAD segment              our appended data
+#
+# Why RELA relocations are needed
+# linker64 applies ASLR: it loads the binary at   base + p_vaddr.
+# The binary's .data.rel.ro, .got, and .init_array contain absolute
+# virtual addresses (vtable function pointers etc.) resolved at static
+# link time.  Without relocation records those addresses are wrong by
+# exactly `base`.
+#
+# Fix: synthesise R_AARCH64_RELATIVE (0x403) RELA entries for every
+# 8-byte slot in those sections whose value falls within the binary's
+# own virtual-address range [min_vaddr, max_vaddr).  linker64 applies
+#   *(base + r_offset) = base + r_addend
+# for each entry, restoring all absolute pointers before it calls
+# the entry point.  Values outside that range (size, align, zero) are
+# left untouched — they need no adjustment.
+# -------------------------------------------------------------------
+if [[ "$IS_TERMUX" -eq 1 ]] && command -v codex &>/dev/null; then
+    NPM_GLOBAL="$(npm root -g 2>/dev/null || true)"
+    if [[ -n "$NPM_GLOBAL" ]]; then
+        NATIVE_BIN="$(find "$NPM_GLOBAL" -path "*/codex-linux-*/vendor/*/codex/codex" ! -name "*.real" -type f 2>/dev/null | head -1)"
+        if [[ -n "$NATIVE_BIN" ]]; then
+            NATIVE_REAL="${NATIVE_BIN}.real"
+            if [[ ! -f "$NATIVE_REAL" ]]; then
+                mv "$NATIVE_BIN" "$NATIVE_REAL"
+            fi
+            chmod +x "$NATIVE_REAL"
+
+            # Patch codex.real: ET_DYN + PT_DYNAMIC + SHT_DYNAMIC + synthetic RELA.
+            python3 - "$NATIVE_REAL" << 'PATCH_EOF'
+import struct, sys
+
+def patch(path):
+    with open(path, 'rb') as f:
+        data = bytearray(f.read())
+    lt = '<'
+    if data[:4] != b'\x7fELF' or data[4] != 2:
+        print("Not 64-bit ELF, skipping"); return
+
+    # 1. Ensure ET_DYN
+    e_type = struct.unpack_from(lt+'H', data, 16)[0]
+    if e_type == 2:
+        struct.pack_into(lt+'H', data, 16, 3); print("ET_EXEC -> ET_DYN")
+    elif e_type != 3:
+        print(f"Unexpected e_type {e_type}"); return
+
+    e_phoff     = struct.unpack_from(lt+'Q', data, 32)[0]
+    e_shoff     = struct.unpack_from(lt+'Q', data, 40)[0]
+    e_phentsize = struct.unpack_from(lt+'H', data, 54)[0]
+    e_phnum     = struct.unpack_from(lt+'H', data, 56)[0]
+    e_shentsize = struct.unpack_from(lt+'H', data, 58)[0]
+    e_shnum     = struct.unpack_from(lt+'H', data, 60)[0]
+    e_shstrndx  = struct.unpack_from(lt+'H', data, 62)[0]
+
+    # 2. Parse program headers
+    phdrs = []
+    for i in range(e_phnum):
+        o = e_phoff + i*e_phentsize
+        pt, pf = struct.unpack_from(lt+'II', data, o)
+        po, pv, pp, pfs, pms, pa = struct.unpack_from(lt+'QQQQQQ', data, o+8)
+        phdrs.append(dict(type=pt,flags=pf,offset=po,vaddr=pv,paddr=pp,
+                          filesz=pfs,memsz=pms,align=pa,idx=i))
+
+    # 3. Parse section headers + string table
+    ss   = e_shstrndx * e_shentsize
+    sfof = struct.unpack_from(lt+'Q', data, e_shoff+ss+24)[0]
+    sfsz = struct.unpack_from(lt+'Q', data, e_shoff+ss+32)[0]
+    strt = bytes(data[sfof:sfof+sfsz])
+    shdrs = []
+    for i in range(e_shnum):
+        o  = e_shoff + i*e_shentsize
+        ni = struct.unpack_from(lt+'I', data, o)[0]
+        st = struct.unpack_from(lt+'I', data, o+4)[0]
+        av = struct.unpack_from(lt+'Q', data, o+16)[0]
+        fo = struct.unpack_from(lt+'Q', data, o+24)[0]
+        sz = struct.unpack_from(lt+'Q', data, o+32)[0]
+        try: nm = strt[ni:strt.index(b'\x00',ni)].decode()
+        except: nm = ''
+        shdrs.append(dict(idx=i,name=nm,name_off=ni,type=st,addr=av,foff=fo,size=sz))
+    secs = {sh['name']: sh for sh in shdrs if sh['name']}
+
+    # Check patch state
+    has_sht_dynamic = any(sh['type'] == 6 for sh in shdrs)
+    pt_dyn = next((p for p in phdrs if p['type'] == 2), None)
+
+    if has_sht_dynamic and pt_dyn:
+        print("Already fully patched, skipping"); return
+
+    loads = [p for p in phdrs if p['type']==1]
+    last  = max(loads, key=lambda p: p['offset']+p['filesz'])
+
+    if pt_dyn:
+        # Partially patched: PT_DYNAMIC exists but SHT_DYNAMIC is missing.
+        # Extract .dynamic location from the existing PT_DYNAMIC phdr.
+        dyn_fo = pt_dyn['offset']
+        dv     = pt_dyn['vaddr']
+        dyn_sz = pt_dyn['filesz']
+        print(f"Partial patch detected: adding SHT_DYNAMIC foff=0x{dyn_fo:x} vaddr=0x{dv:x}")
+    else:
+        # Full patch: RELA + PT_DYNAMIC + SHT_DYNAMIC
+        min_v = min(p['vaddr'] for p in loads)
+        max_v = max(p['vaddr']+p['memsz'] for p in loads)
+        print(f"Last PT_LOAD idx={last['idx']} ptr_range=[0x{min_v:x},0x{max_v:x})")
+
+        # Free slot: prefer PT_GNU_STACK, then other GNU_* headers
+        free = -1
+        for tgt in [0x6474e551,0x6474e550,0x6474e552,0x6474e553,0]:
+            for p in phdrs:
+                if p['type']==tgt: free=p['idx']; break
+            if free!=-1: break
+        if free==-1: sys.exit("No free phdr slot for PT_DYNAMIC")
+        print(f"Using phdr slot {free} for PT_DYNAMIC")
+
+        # 4. Generate R_AARCH64_RELATIVE (0x403) entries for absolute ptrs
+        relas = []
+        def scan(name):
+            if name not in secs: return
+            s = secs[name]; n = 0
+            for i in range(0, s['size']-7, 8):
+                v = struct.unpack_from(lt+'Q', data, s['foff']+i)[0]
+                if min_v <= v < max_v:
+                    relas.append((s['addr']+i, 0x403, v)); n += 1
+            print(f"  {name}: {n}/{s['size']//8} ptrs")
+
+        print("Scanning sections:")
+        for nm in ['.got','.init_array','.fini_array','.data.rel.ro']:
+            scan(nm)
+        relas.sort(); print(f"Total RELA entries: {len(relas)}")
+
+        # 5. Append RELA + .dynamic at end of file (8-byte aligned)
+        a8 = lambda x: (x+7)&~7
+        old_sz  = len(data)
+        rela_fo = a8(old_sz)
+        rela_b  = bytearray()
+        for ro, ri, ra in relas:
+            rela_b += struct.pack(lt+'QQq', ro, ri, ra)
+        dyn_fo  = a8(rela_fo + len(rela_b))
+        dyn_sz  = 4*16
+        new_sz  = dyn_fo + dyn_sz
+
+        f2v = lambda fo: last['vaddr'] + (fo - last['offset'])
+        rv  = f2v(rela_fo); dv = f2v(dyn_fo)
+        print(f"RELA  foff=0x{rela_fo:x} vaddr=0x{rv:x} size={len(rela_b)}")
+        print(f".dyn  foff=0x{dyn_fo:x}  vaddr=0x{dv:x}")
+
+        # .dynamic: DT_RELA, DT_RELASZ, DT_RELAENT, DT_NULL
+        dyn = bytearray()
+        for tag,val in [(7,rv),(8,len(rela_b)),(9,24),(0,0)]:
+            dyn += struct.pack(lt+'QQ', tag, val)
+
+        # 6. Extend last PT_LOAD to cover appended data
+        new_fs = new_sz - last['offset']
+        new_ms = new_fs + max(0, last['memsz']-last['filesz'])
+        po = e_phoff + last['idx']*e_phentsize
+        struct.pack_into(lt+'Q', data, po+32, new_fs)
+        struct.pack_into(lt+'Q', data, po+40, new_ms)
+        print(f"Extended PT_LOAD[{last['idx']}]: filesz 0x{last['filesz']:x}->0x{new_fs:x}")
+
+        # 7. Write PT_DYNAMIC program header into free slot
+        po2 = e_phoff + free*e_phentsize
+        struct.pack_into(lt+'I', data, po2,   2)   # PT_DYNAMIC
+        struct.pack_into(lt+'I', data, po2+4, 6)   # PF_R|PF_W
+        for off,val in [(8,dyn_fo),(16,dv),(24,dv),(32,dyn_sz),(40,dyn_sz),(48,8)]:
+            struct.pack_into(lt+'Q', data, po2+off, val)
+        print(f"PT_DYNAMIC at slot {free}, vaddr=0x{dv:x}")
+
+        # Append RELA + .dynamic data
+        while len(data) < rela_fo: data.append(0)
+        data += rela_b
+        while len(data) < dyn_fo:  data.append(0)
+        data += dyn
+
+    # 7.5. Add SHT_DYNAMIC section header (repurpose .comment)
+    # linker64 error ".dynamic section header was not found" requires a section
+    # header of type SHT_DYNAMIC (6), not just PT_DYNAMIC in phdrs.
+    # ".comment\0" and ".dynamic\0" are both 9 bytes — rename in shstrtab safely.
+    for sh in shdrs:
+        if sh['name'] == '.comment':
+            o = e_shoff + sh['idx']*e_shentsize
+            data[sfof+sh['name_off']:sfof+sh['name_off']+9] = b'.dynamic\0'
+            struct.pack_into(lt+'I', data, o+4,  6)        # sh_type = SHT_DYNAMIC
+            struct.pack_into(lt+'Q', data, o+8,  3)        # sh_flags = SHF_WRITE|SHF_ALLOC
+            struct.pack_into(lt+'Q', data, o+16, dv)       # sh_addr
+            struct.pack_into(lt+'Q', data, o+24, dyn_fo)   # sh_offset
+            struct.pack_into(lt+'Q', data, o+32, dyn_sz)   # sh_size
+            struct.pack_into(lt+'I', data, o+40, 0)        # sh_link
+            struct.pack_into(lt+'I', data, o+44, 0)        # sh_info
+            struct.pack_into(lt+'Q', data, o+48, 8)        # sh_addralign
+            struct.pack_into(lt+'Q', data, o+56, 16)       # sh_entsize (Elf64_Dyn)
+            print(f"SHT_DYNAMIC at section[{sh['idx']}], vaddr=0x{dv:x}")
+            break
+    else:
+        print("WARNING: .comment section not found; SHT_DYNAMIC not added")
+
+    with open(path,'wb') as f: f.write(data)
+    print(f"Done. {len(data)//1024//1024} MB")
+
+patch(sys.argv[1])
+PATCH_EOF
+
+            # Wrapper: direct exec — termux-exec wraps as linker64 codex.real,
+            # linker64 reads PT_DYNAMIC, applies RELA, calls entry point.
+            cat > "$NATIVE_BIN" << 'NATIVE_WRAP_EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+exec "$(dirname "$(readlink -f "$0")")/codex.real" "$@"
+NATIVE_WRAP_EOF
+            chmod +x "$NATIVE_BIN"
+            info "Patched native codex binary (ET_DYN + PT_DYNAMIC + RELA)"
+        fi
+
+        # Restore the codex bin to invoke node directly.
+        CODEX_JS="$NPM_GLOBAL/@openai/codex/bin/codex.js"
+        PROOT_WRAPPER="$NPM_GLOBAL/@openai/codex/bin/codex-termux-wrapper.sh"
+        if [[ -f "$CODEX_JS" && -f "$PROOT_WRAPPER" ]]; then
+            cat > "$PROOT_WRAPPER" << 'NODE_WRAP_EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+exec node "$(dirname "$(readlink -f "$0")")/codex.js" "$@"
+NODE_WRAP_EOF
+            chmod +x "$PROOT_WRAPPER"
+        fi
+    fi
 fi
 
 # -------------------------------------------------------------------
