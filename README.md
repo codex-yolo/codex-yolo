@@ -28,15 +28,23 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 **One-liner** (macOS, Linux, WSL, Termux):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
+command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
 ```
 
 > For **zsh** users: replace `~/.bashrc` with `~/.zshrc`
 
-This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. It also installs `git`, `tmux`, and `codex` (Codex CLI via npm) if they are missing. Override the install location with `CODEX_YOLO_HOME`:
+This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. It also installs `git`, `tmux`, `curl`, and `codex` (Codex CLI via npm) if they are missing. Override the install location with `CODEX_YOLO_HOME`:
 
 ```bash
-CODEX_YOLO_HOME=~/my/path curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
+command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; CODEX_YOLO_HOME=~/my/path curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && source ~/.bashrc
+```
+
+**Local install** (from a cloned repo, no network access needed):
+
+```bash
+git clone https://github.com/codex-yolo/codex-yolo.git ~/.codex-yolo
+cd ~/.codex-yolo
+./install.sh --local
 ```
 
 **Manual install:**
@@ -93,6 +101,9 @@ Re-attach later with `codex-yolo -r` (or `codex-yolo --resume`).
 -f, --file FILE       Read a multiline prompt from a text file
 -r, --resume          Re-attach to an existing yolo session
 -h, --help            Show help
+
+install.sh options:
+--local               Install from the local repo without pulling from GitHub
 ```
 
 ## How it works
