@@ -150,6 +150,13 @@ if ! command -v codex &>/dev/null; then
         npm install -g @openai/codex 2>/dev/null && CODEX_INSTALLED=1
     fi
 
+    # Verify codex actually works (some platforms install but fail at runtime)
+    if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
+        warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
+        npm uninstall -g @openai/codex 2>/dev/null || true
+        npm install -g @mmmbuto/codex-cli-termux 2>/dev/null && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
+    fi
+
     # If distro Node.js failed (common on aarch64 with 64KB pages),
     # try NodeSource v22 with proper Node.js
     if [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null; then
@@ -164,7 +171,13 @@ if ! command -v codex &>/dev/null; then
             rm -f /tmp/nodesource_setup.sh
         fi
         if command -v npm &>/dev/null; then
-            npm install -g @openai/codex && CODEX_INSTALLED=1
+            npm install -g @openai/codex 2>/dev/null && CODEX_INSTALLED=1
+            # Verify codex works after NodeSource install too
+            if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
+                warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
+                npm uninstall -g @openai/codex 2>/dev/null || true
+                npm install -g @mmmbuto/codex-cli-termux 2>/dev/null && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
+            fi
         else
             warn "npm is not available — cannot install Codex CLI"
         fi
