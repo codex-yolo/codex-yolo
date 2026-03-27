@@ -245,6 +245,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
     if [[ -f "$RC_FILE" ]] && grep -qF '.local/bin' "$RC_FILE" 2>/dev/null; then
         info "PATH entry already exists in $RC_FILE"
     else
+        touch "$RC_FILE"
         printf '\n# Added by codex-yolo installer\n%s\n' "$EXPORT_LINE" >> "$RC_FILE"
         info "Added $BIN_DIR to PATH in $RC_FILE"
     fi
