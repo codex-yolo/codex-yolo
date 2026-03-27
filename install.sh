@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — Install codex-yolo from source
-# Usage: curl -fsSL https://<url>/install.sh | bash && source ~/.bashrc
+# Usage: curl -fsSL https://<url>/install.sh | bash && export PATH="$HOME/.local/bin:$PATH"
 #        ./install.sh --local   # install from the current local repo
 set -euo pipefail
 
@@ -228,7 +228,22 @@ info "Linked codex-yolo → $BIN_DIR/codex-yolo"
 # -------------------------------------------------------------------
 # Ensure ~/.local/bin is in PATH
 # -------------------------------------------------------------------
-SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
+# Detect the running shell reliably: $SHELL may be /bin/sh in Docker
+# even when the user is actually running bash.
+_detect_shell() {
+    local sh_name
+    sh_name="$(basename "${SHELL:-}")"
+    # If $SHELL says sh, check if we're actually running bash/zsh
+    if [[ "$sh_name" == "sh" ]] || [[ -z "$sh_name" ]]; then
+        if [[ -n "${BASH_VERSION:-}" ]]; then
+            sh_name="bash"
+        elif [[ -n "${ZSH_VERSION:-}" ]]; then
+            sh_name="zsh"
+        fi
+    fi
+    echo "$sh_name"
+}
+SHELL_NAME="$(_detect_shell)"
 case "$SHELL_NAME" in
     zsh)  RC_FILE="$HOME/.zshrc" ;;
     bash) RC_FILE="$HOME/.bashrc" ;;
@@ -260,3 +275,7 @@ printf "    source %s\n\n" "$RC_FILE"
 printf "  Usage:\n"
 printf "    cd /path/to/your/project\n"
 printf "    codex-yolo \"fix the tests\" \"update docs\"\n\n"
+
+# Export PATH in the current process so that when this script is sourced
+# or when the caller does `source <rc_file>`, the binary is immediately available.
+export PATH="$BIN_DIR:$PATH"
