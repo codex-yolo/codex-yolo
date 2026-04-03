@@ -167,7 +167,7 @@ main() {
 
 build_agent_cmd() {
     local model="$1" task="$2"
-    local cmd="codex"
+    local cmd="codex --yolo"
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
