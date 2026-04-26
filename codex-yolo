@@ -231,6 +231,10 @@ main() {
             (( no_cleanup )) && merge_opts="$merge_opts --no-cleanup"
             [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
             (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && merge_opts="$merge_opts --no-codex-sandbox"
+            if [[ -n "${CODEX_YOLO_FAKE_BWRAP_DIR:-}" ]]; then
+                local fake_bwrap_dir="${CODEX_YOLO_FAKE_BWRAP_DIR//\'/\'\\\'\'}"
+                merge_opts="$merge_opts --fake-bwrap-dir '$fake_bwrap_dir'"
+            fi
 
             tmux new-window -t "$SESSION_NAME" -n "merge" -c "$work_dir"
             tmux send-keys -t "$SESSION_NAME:merge" \
@@ -255,13 +259,16 @@ main() {
 build_agent_cmd() {
     local model="$1" task="$2"
     local cmd
+    local prefix
+
+    prefix="$(codex_yolo_command_prefix)"
 
     if (( CODEX_YOLO_FORCE_CODEX_SANDBOX )); then
-        cmd="codex --full-auto"
+        cmd="${prefix}codex --full-auto"
     elif (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
-        cmd="codex --dangerously-bypass-approvals-and-sandbox"
+        cmd="${prefix}codex --dangerously-bypass-approvals-and-sandbox"
     else
-        cmd="codex --yolo"
+        cmd="${prefix}codex --yolo"
     fi
 
     if [[ -n "$model" ]]; then
@@ -293,7 +300,8 @@ build_agent_cmd() {
 
 build_exec_agent_cmd() {
     local model="$1" task="$2"
-    local cmd="codex exec"
+    local cmd
+    cmd="$(codex_yolo_command_prefix)codex exec"
 
     if (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
         cmd="$cmd --dangerously-bypass-approvals-and-sandbox"

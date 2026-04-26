@@ -929,6 +929,8 @@ assert_eq "build_exec_agent_cmd: forced Codex sandbox keeps sandboxed exec" \
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+CODEX_YOLO_FAKE_BWRAP_DIR=""
+CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 
 section "configure_codex_sandbox — Sandbox fallback"
 
@@ -955,6 +957,7 @@ _test_configure_auto_sandbox_supported() {
     old_path="$PATH"
     PATH="$stub_dir:$PATH"
     CODEX_YOLO_TEST_UNAME_S=Linux
+    CODEX_YOLO_CONTAINER_DETECTED=0
     CODEX_YOLO_SANDBOX_PROBE_RESULT=""
     CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
 
@@ -963,6 +966,7 @@ _test_configure_auto_sandbox_supported() {
 
     PATH="$old_path"
     unset CODEX_YOLO_TEST_UNAME_S
+    unset CODEX_YOLO_CONTAINER_DETECTED
     rm -rf "$stub_dir"
 
     (( result == 0 )) && \
@@ -977,6 +981,7 @@ _test_configure_auto_sandbox_unsupported() {
     old_path="$PATH"
     PATH="$stub_dir:$PATH"
     CODEX_YOLO_TEST_UNAME_S=Linux
+    CODEX_YOLO_CONTAINER_DETECTED=0
     CODEX_YOLO_SANDBOX_PROBE_RESULT=""
     CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
 
@@ -985,11 +990,77 @@ _test_configure_auto_sandbox_unsupported() {
 
     PATH="$old_path"
     unset CODEX_YOLO_TEST_UNAME_S
+    unset CODEX_YOLO_CONTAINER_DETECTED
     rm -rf "$stub_dir"
 
     (( result == 0 )) && \
     (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 1 )) && \
     (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 0 ))
+}
+
+_test_configure_auto_container_namespace_error_uses_fake_bwrap() {
+    local stub_dir old_path result fake_dir
+    stub_dir="$(mktemp -d)"
+    _make_codex_sandbox_stub "$stub_dir" 1
+    fake_dir="$stub_dir/fake-bwrap"
+    old_path="$PATH"
+    PATH="$stub_dir:$PATH"
+    CODEX_YOLO_TEST_UNAME_S=Linux
+    CODEX_YOLO_CONTAINER_DETECTED=1
+    CODEX_YOLO_SANDBOX_PROBE_RESULT=""
+    CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
+    CODEX_YOLO_FAKE_BWRAP_DIR="$fake_dir"
+    CODEX_YOLO_FAKE_BWRAP_ENABLED=0
+
+    configure_codex_sandbox auto >/dev/null 2>&1
+    result=$?
+
+    PATH="$old_path"
+    unset CODEX_YOLO_TEST_UNAME_S
+    unset CODEX_YOLO_CONTAINER_DETECTED
+
+    local ok=1
+    (( result == 0 )) && \
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 1 )) && \
+    (( CODEX_YOLO_FAKE_BWRAP_ENABLED == 1 )) && \
+    [[ -x "$fake_dir/bwrap" ]] && ok=0
+
+    rm -rf "$stub_dir"
+    return $ok
+}
+
+_test_fake_bwrap_execs_command_after_separator() {
+    local dir output
+    dir="$(mktemp -d)"
+    CODEX_YOLO_FAKE_BWRAP_DIR="$dir"
+    CODEX_YOLO_FAKE_BWRAP_ENABLED=0
+
+    codex_yolo_enable_fake_bwrap >/dev/null 2>&1 || {
+        rm -rf "$dir"
+        return 1
+    }
+
+    output="$("$dir/bwrap" --ro-bind / / -- bash -lc 'printf ok')" || {
+        rm -rf "$dir"
+        return 1
+    }
+
+    rm -rf "$dir"
+    [[ "$output" == "ok" ]]
+}
+
+_test_build_agent_cmd_prefixes_fake_bwrap_path() {
+    CODEX_YOLO_FAKE_BWRAP_DIR="/tmp/codex-yolo-test-bwrap"
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+    CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+
+    local output
+    output="$(build_agent_cmd "" "fix the bug")"
+
+    CODEX_YOLO_FAKE_BWRAP_DIR=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+
+    [[ "$output" == "PATH='/tmp/codex-yolo-test-bwrap':\"\$PATH\" codex --dangerously-bypass-approvals-and-sandbox 'fix the bug'" ]]
 }
 
 _test_configure_no_sandbox_option() {
@@ -1006,6 +1077,9 @@ _test_configure_force_sandbox_option() {
 
 assert_ok "configure_codex_sandbox: auto keeps sandbox when probe succeeds" _test_configure_auto_sandbox_supported
 assert_ok "configure_codex_sandbox: auto bypasses sandbox when probe fails" _test_configure_auto_sandbox_unsupported
+assert_ok "configure_codex_sandbox: auto uses fake bwrap for container namespace errors" _test_configure_auto_container_namespace_error_uses_fake_bwrap
+assert_ok "fake bwrap: executes command after separator" _test_fake_bwrap_execs_command_after_separator
+assert_ok "build_agent_cmd: prefixes fake bwrap path" _test_build_agent_cmd_prefixes_fake_bwrap_path
 assert_ok "configure_codex_sandbox: --no-codex-sandbox bypasses sandbox" _test_configure_no_sandbox_option
 assert_ok "configure_codex_sandbox: --force-codex-sandbox forces sandbox" _test_configure_force_sandbox_option
 
@@ -1013,6 +1087,9 @@ CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 CODEX_YOLO_SANDBOX_PROBE_RESULT=""
 CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
+CODEX_YOLO_CONTAINER_DETECTED=""
+CODEX_YOLO_FAKE_BWRAP_DIR=""
+CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 
 ###############################################################################
 #                       ENSURE_CODEX_CONFIG                                   #

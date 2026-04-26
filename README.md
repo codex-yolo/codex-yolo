@@ -143,10 +143,13 @@ install.sh options:
 --local               Install from the local repo without pulling from GitHub
 ```
 
-By default, Linux launches probe `codex sandbox linux true` once. If the Codex
-sandbox cannot start, such as when bubblewrap is blocked inside a container,
-agents are launched without Codex sandboxing. Use `--force-codex-sandbox` to
-require the sandbox and surface the failure instead.
+By default, `codex-yolo` probes `codex sandbox linux true` once. In containers
+where bubblewrap fails with namespace permission errors, `codex-yolo` creates a
+temporary fake `bwrap` earlier in `PATH` and launches agents without Codex
+sandboxing. The fake `bwrap` executes the command after bubblewrap's `--`
+separator directly, so it should only be used inside an externally isolated
+container. Use `--force-codex-sandbox` to require the real sandbox and surface
+failures instead.
 
 ## How it works
 

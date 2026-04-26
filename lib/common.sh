@@ -27,6 +27,9 @@ CODEX_YOLO_BYPASS_CODEX_SANDBOX="${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0}"
 CODEX_YOLO_FORCE_CODEX_SANDBOX="${CODEX_YOLO_FORCE_CODEX_SANDBOX:-0}"
 CODEX_YOLO_SANDBOX_PROBE_RESULT="${CODEX_YOLO_SANDBOX_PROBE_RESULT:-}"
 CODEX_YOLO_SANDBOX_PROBE_MESSAGE="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE:-}"
+CODEX_YOLO_CONTAINER_DETECTED="${CODEX_YOLO_CONTAINER_DETECTED:-}"
+CODEX_YOLO_FAKE_BWRAP_DIR="${CODEX_YOLO_FAKE_BWRAP_DIR:-}"
+CODEX_YOLO_FAKE_BWRAP_ENABLED="${CODEX_YOLO_FAKE_BWRAP_ENABLED:-0}"
 
 check_prereqs() {
     local missing=0
@@ -70,6 +73,67 @@ check_git_merge_tree() {
     (( major > 2 || (major == 2 && minor >= 38) ))
 }
 
+codex_yolo_running_in_container() {
+    if [[ -n "${CODEX_YOLO_CONTAINER_DETECTED:-}" ]]; then
+        [[ "$CODEX_YOLO_CONTAINER_DETECTED" == "1" ]]
+        return
+    fi
+
+    [[ -f /.dockerenv || -f /run/.containerenv ]] && return 0
+
+    if grep -qaE 'docker|kubepods|containerd|libpod|lxc' /proc/1/cgroup 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+codex_yolo_bwrap_namespace_error() {
+    local output="$1"
+    [[ "$output" == *"No permissions to create a new namespace"* ]] || \
+    [[ "$output" == *"Failed to create namespace"* ]] || \
+    [[ "$output" == *"Operation not permitted"* ]]
+}
+
+codex_yolo_enable_fake_bwrap() {
+    local shim_dir="${CODEX_YOLO_FAKE_BWRAP_DIR:-}"
+    if [[ -z "$shim_dir" ]]; then
+        shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-yolo-fake-bwrap.XXXXXX")" || return 1
+    else
+        mkdir -p "$shim_dir" 2>/dev/null || return 1
+    fi
+
+    cat > "$shim_dir/bwrap" <<'SH'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --)
+            shift
+            exec "$@"
+            ;;
+    esac
+    shift
+done
+
+echo "codex-yolo fake bwrap: no command after --" >&2
+exit 127
+SH
+    chmod +x "$shim_dir/bwrap" || return 1
+
+    CODEX_YOLO_FAKE_BWRAP_DIR="$shim_dir"
+    CODEX_YOLO_FAKE_BWRAP_ENABLED=1
+    export CODEX_YOLO_FAKE_BWRAP_DIR CODEX_YOLO_FAKE_BWRAP_ENABLED
+}
+
+codex_yolo_command_prefix() {
+    if [[ -z "${CODEX_YOLO_FAKE_BWRAP_DIR:-}" ]]; then
+        return 0
+    fi
+
+    local dir="${CODEX_YOLO_FAKE_BWRAP_DIR//\'/\'\\\'\'}"
+    printf "PATH='%s':\"\$PATH\" " "$dir"
+}
+
 codex_linux_sandbox_works() {
     local os
     os="${CODEX_YOLO_TEST_UNAME_S:-$(uname -s 2>/dev/null || true)}"
@@ -104,6 +168,27 @@ configure_codex_sandbox() {
 
     case "$policy" in
         auto)
+            if codex_yolo_running_in_container; then
+                if codex_linux_sandbox_works; then
+                    return 0
+                fi
+
+                CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+                local first_line="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE%%$'\n'*}"
+                [[ -z "$first_line" ]] && first_line="codex sandbox linux true failed"
+
+                if codex_yolo_bwrap_namespace_error "$CODEX_YOLO_SANDBOX_PROBE_MESSAGE"; then
+                    codex_yolo_enable_fake_bwrap || return 1
+                    log_warn "Container bwrap is unavailable; using fake bwrap shim: $CODEX_YOLO_FAKE_BWRAP_DIR/bwrap"
+                else
+                    log_warn "Container detected; launching agents without Codex sandboxing."
+                fi
+
+                log_warn "Sandbox probe: $first_line"
+                log_warn "Use --force-codex-sandbox to require Codex sandboxing anyway."
+                return 0
+            fi
+
             if codex_linux_sandbox_works; then
                 return 0
             fi
