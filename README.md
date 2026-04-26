@@ -128,6 +128,8 @@ Re-attach later with `codex-yolo -r` (or `codex-yolo --resume`).
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
 -r, --resume          Re-attach to an existing yolo session
+--no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
+--force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
 -h, --help            Show help
 
 Worktree options:
@@ -141,9 +143,14 @@ install.sh options:
 --local               Install from the local repo without pulling from GitHub
 ```
 
+By default, Linux launches probe `codex sandbox linux true` once. If the Codex
+sandbox cannot start, such as when bubblewrap is blocked inside a container,
+agents are launched without Codex sandboxing. Use `--force-codex-sandbox` to
+require the sandbox and surface the failure instead.
+
 ## How it works
 
-1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode.
+1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
 2. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
    - Detects six prompt styles (see below)

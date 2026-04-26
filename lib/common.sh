@@ -23,6 +23,11 @@ log_error() {
     printf "${_RED}[%s ERROR]${_RESET} %s\n" "$(date '+%H:%M:%S')" "$*" >&2
 }
 
+CODEX_YOLO_BYPASS_CODEX_SANDBOX="${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0}"
+CODEX_YOLO_FORCE_CODEX_SANDBOX="${CODEX_YOLO_FORCE_CODEX_SANDBOX:-0}"
+CODEX_YOLO_SANDBOX_PROBE_RESULT="${CODEX_YOLO_SANDBOX_PROBE_RESULT:-}"
+CODEX_YOLO_SANDBOX_PROBE_MESSAGE="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE:-}"
+
 check_prereqs() {
     local missing=0
     if ! command -v tmux &>/dev/null; then
@@ -63,6 +68,65 @@ check_git_merge_tree() {
     local major minor
     IFS='.' read -r major minor <<< "$version"
     (( major > 2 || (major == 2 && minor >= 38) ))
+}
+
+codex_linux_sandbox_works() {
+    local os
+    os="${CODEX_YOLO_TEST_UNAME_S:-$(uname -s 2>/dev/null || true)}"
+    if [[ "$os" != "Linux" ]]; then
+        return 0
+    fi
+
+    if [[ -n "${CODEX_YOLO_SANDBOX_PROBE_RESULT:-}" ]]; then
+        if [[ "$CODEX_YOLO_SANDBOX_PROBE_RESULT" == "ok" ]]; then
+            return 0
+        fi
+        return 1
+    fi
+
+    local output
+    if output="$(codex sandbox linux true 2>&1)"; then
+        CODEX_YOLO_SANDBOX_PROBE_RESULT="ok"
+        CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
+        return 0
+    fi
+
+    CODEX_YOLO_SANDBOX_PROBE_RESULT="fail"
+    CODEX_YOLO_SANDBOX_PROBE_MESSAGE="$output"
+    return 1
+}
+
+configure_codex_sandbox() {
+    local policy="${1:-auto}"
+
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+    CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+
+    case "$policy" in
+        auto)
+            if codex_linux_sandbox_works; then
+                return 0
+            fi
+
+            CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+            local first_line="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE%%$'\n'*}"
+            [[ -z "$first_line" ]] && first_line="codex sandbox linux true failed"
+            log_warn "Codex Linux sandbox is unavailable; launching agents without Codex sandboxing."
+            log_warn "Sandbox probe: $first_line"
+            log_warn "Use --force-codex-sandbox to require Codex sandboxing instead."
+            ;;
+        off|none|no|disabled)
+            CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+            log_warn "Codex sandbox disabled by option; rely on external isolation."
+            ;;
+        force)
+            CODEX_YOLO_FORCE_CODEX_SANDBOX=1
+            ;;
+        *)
+            log_error "Unknown Codex sandbox policy: $policy"
+            return 1
+            ;;
+    esac
 }
 
 # Ensure the Codex CLI config directory and config.toml exist.

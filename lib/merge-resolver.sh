@@ -5,7 +5,7 @@
 # sequentially merges each worktree branch into the base branch, and
 # spawns a Codex agent to resolve any conflicts.
 #
-# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL]
+# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL] [--no-codex-sandbox]
 
 set -u
 
@@ -23,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cleanup)  NO_CLEANUP=1; shift ;;
         --model)       MODEL="$2"; shift 2 ;;
+        --no-codex-sandbox) CODEX_YOLO_BYPASS_CODEX_SANDBOX=1; shift ;;
         *)             shift ;;
     esac
 done
@@ -131,8 +132,12 @@ Do NOT modify files that are not in the conflicted list above."
 
     tmux new-window -t "$SESSION_NAME" -n "$resolve_win" -c "$REPO_DIR" 2>/dev/null || true
 
-    local cmd="cat '$tmpfile' | codex exec -"
-    [[ -n "$MODEL" ]] && cmd="cat '$tmpfile' | codex exec --model $MODEL -"
+    local codex_cmd="codex exec"
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && \
+        codex_cmd="$codex_cmd --dangerously-bypass-approvals-and-sandbox"
+    [[ -n "$MODEL" ]] && codex_cmd="$codex_cmd --model $MODEL"
+
+    local cmd="cat '$tmpfile' | $codex_cmd -"
     cmd="$cmd ; touch '$resolve_done'"
 
     tmux send-keys -t "$SESSION_NAME:$resolve_win" "$cmd" C-m

@@ -884,6 +884,21 @@ _out="$(build_agent_cmd "o4-mini" "")"
 assert_eq "build_agent_cmd: interactive with model" \
     "codex --yolo --model o4-mini" "$_out"
 
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+_out="$(build_agent_cmd "" "fix the bug")"
+assert_eq "build_agent_cmd: no Codex sandbox uses explicit bypass" \
+    "codex --dangerously-bypass-approvals-and-sandbox 'fix the bug'" "$_out"
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=1
+_out="$(build_agent_cmd "o4-mini" "fix the bug")"
+assert_eq "build_agent_cmd: forced Codex sandbox uses full-auto" \
+    "codex --full-auto --model o4-mini 'fix the bug'" "$_out"
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+
 section "build_exec_agent_cmd — Worktree command construction"
 
 _out="$(build_exec_agent_cmd "" "fix the bug")"
@@ -900,6 +915,104 @@ assert_eq "build_exec_agent_cmd: single-quote escaping" \
 
 _out="$(build_exec_agent_cmd "" "task")"
 assert_contains "build_exec_agent_cmd: uses codex exec" "$_out" "codex exec"
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+_out="$(build_exec_agent_cmd "" "fix the bug")"
+assert_eq "build_exec_agent_cmd: no Codex sandbox uses explicit bypass" \
+    "codex exec --dangerously-bypass-approvals-and-sandbox 'fix the bug'" "$_out"
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=1
+_out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
+assert_eq "build_exec_agent_cmd: forced Codex sandbox keeps sandboxed exec" \
+    "codex exec --model gpt-5 'fix the bug'" "$_out"
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+
+section "configure_codex_sandbox — Sandbox fallback"
+
+_make_codex_sandbox_stub() {
+    local dir="$1" exit_code="$2"
+    cat > "$dir/codex" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1 \$2 \$3" == "sandbox linux true" ]]; then
+    if [[ "$exit_code" -eq 0 ]]; then
+        exit 0
+    fi
+    echo "bwrap: Failed to create namespace" >&2
+    exit "$exit_code"
+fi
+exit 0
+EOF
+    chmod +x "$dir/codex"
+}
+
+_test_configure_auto_sandbox_supported() {
+    local stub_dir old_path result
+    stub_dir="$(mktemp -d)"
+    _make_codex_sandbox_stub "$stub_dir" 0
+    old_path="$PATH"
+    PATH="$stub_dir:$PATH"
+    CODEX_YOLO_TEST_UNAME_S=Linux
+    CODEX_YOLO_SANDBOX_PROBE_RESULT=""
+    CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
+
+    configure_codex_sandbox auto >/dev/null 2>&1
+    result=$?
+
+    PATH="$old_path"
+    unset CODEX_YOLO_TEST_UNAME_S
+    rm -rf "$stub_dir"
+
+    (( result == 0 )) && \
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 0 )) && \
+    (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 0 ))
+}
+
+_test_configure_auto_sandbox_unsupported() {
+    local stub_dir old_path result
+    stub_dir="$(mktemp -d)"
+    _make_codex_sandbox_stub "$stub_dir" 1
+    old_path="$PATH"
+    PATH="$stub_dir:$PATH"
+    CODEX_YOLO_TEST_UNAME_S=Linux
+    CODEX_YOLO_SANDBOX_PROBE_RESULT=""
+    CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
+
+    configure_codex_sandbox auto >/dev/null 2>&1
+    result=$?
+
+    PATH="$old_path"
+    unset CODEX_YOLO_TEST_UNAME_S
+    rm -rf "$stub_dir"
+
+    (( result == 0 )) && \
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 1 )) && \
+    (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 0 ))
+}
+
+_test_configure_no_sandbox_option() {
+    configure_codex_sandbox off >/dev/null 2>&1 && \
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 1 )) && \
+    (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 0 ))
+}
+
+_test_configure_force_sandbox_option() {
+    configure_codex_sandbox force >/dev/null 2>&1 && \
+    (( CODEX_YOLO_BYPASS_CODEX_SANDBOX == 0 )) && \
+    (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 1 ))
+}
+
+assert_ok "configure_codex_sandbox: auto keeps sandbox when probe succeeds" _test_configure_auto_sandbox_supported
+assert_ok "configure_codex_sandbox: auto bypasses sandbox when probe fails" _test_configure_auto_sandbox_unsupported
+assert_ok "configure_codex_sandbox: --no-codex-sandbox bypasses sandbox" _test_configure_no_sandbox_option
+assert_ok "configure_codex_sandbox: --force-codex-sandbox forces sandbox" _test_configure_force_sandbox_option
+
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+CODEX_YOLO_SANDBOX_PROBE_RESULT=""
+CODEX_YOLO_SANDBOX_PROBE_MESSAGE=""
 
 ###############################################################################
 #                       ENSURE_CODEX_CONFIG                                   #
@@ -1053,6 +1166,14 @@ assert_ok "launcher: --help exits successfully" \
 
 assert_ok "launcher: -h exits successfully" \
     bash "$SCRIPT_DIR/codex-yolo" -h
+
+_test_help_sandbox_options() {
+    local output
+    output="$(bash "$SCRIPT_DIR/codex-yolo" --help 2>&1)"
+    [[ "$output" == *"--no-codex-sandbox"* ]] && \
+    [[ "$output" == *"--force-codex-sandbox"* ]]
+}
+assert_ok "launcher: --help shows Codex sandbox options" _test_help_sandbox_options
 
 assert_fail "launcher: -d nonexistent path fails" \
     bash "$SCRIPT_DIR/codex-yolo" -d /nonexistent/path/xyz "task"

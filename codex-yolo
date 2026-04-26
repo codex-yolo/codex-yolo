@@ -21,6 +21,8 @@ Options:
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
   -r, --resume          Re-attach to an existing yolo session
+  --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
+  --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
   -h, --help            Show this help
 
 Worktree options:
@@ -54,6 +56,7 @@ tmux_attach() {
 main() {
     local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
+    local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
     local tasks=()
 
     # Parse arguments
@@ -69,6 +72,8 @@ main() {
             --no-merge)        no_merge=1; shift ;;
             --no-cleanup)      no_cleanup=1; shift ;;
             --conflict-poll)   conflict_poll="$2"; shift 2 ;;
+            --no-codex-sandbox)    codex_sandbox_policy="off"; shift ;;
+            --force-codex-sandbox) codex_sandbox_policy="force"; shift ;;
             -r|--resume)   resume=1; shift ;;
             -h|--help)     usage; exit 0 ;;
             -*)            log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -127,6 +132,7 @@ main() {
 
     # Ensure Codex CLI config directory exists
     ensure_codex_config
+    configure_codex_sandbox "$codex_sandbox_policy" || exit 1
 
     # ── worktree setup ───────────────────────────────────────────────────────
     if (( worktree_mode )); then
@@ -224,6 +230,7 @@ main() {
             local merge_opts=""
             (( no_cleanup )) && merge_opts="$merge_opts --no-cleanup"
             [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
+            (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && merge_opts="$merge_opts --no-codex-sandbox"
 
             tmux new-window -t "$SESSION_NAME" -n "merge" -c "$work_dir"
             tmux send-keys -t "$SESSION_NAME:merge" \
@@ -247,7 +254,15 @@ main() {
 
 build_agent_cmd() {
     local model="$1" task="$2"
-    local cmd="codex --yolo"
+    local cmd
+
+    if (( CODEX_YOLO_FORCE_CODEX_SANDBOX )); then
+        cmd="codex --full-auto"
+    elif (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
+        cmd="codex --dangerously-bypass-approvals-and-sandbox"
+    else
+        cmd="codex --yolo"
+    fi
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
@@ -279,6 +294,10 @@ build_agent_cmd() {
 build_exec_agent_cmd() {
     local model="$1" task="$2"
     local cmd="codex exec"
+
+    if (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
+        cmd="$cmd --dangerously-bypass-approvals-and-sandbox"
+    fi
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
