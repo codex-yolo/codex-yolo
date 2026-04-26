@@ -92,6 +92,7 @@ eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^build_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^build_exec_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 
 # ── helper to build realistic pane captures ──────────────────────────────────
 
@@ -854,15 +855,15 @@ section "build_agent_cmd — Command construction"
 
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: no model" \
-    "codex 'fix the bug'" "$_out"
+    "codex --yolo 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "fix the bug")"
 assert_eq "build_agent_cmd: with model" \
-    "codex --model o4-mini 'fix the bug'" "$_out"
+    "codex --yolo --model o4-mini 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "gpt-4.1" "it's a test")"
 assert_eq "build_agent_cmd: single-quote escaping" \
-    "codex --model gpt-4.1 'it'\\''s a test'" "$_out"
+    "codex --yolo --model gpt-4.1 'it'\\''s a test'" "$_out"
 
 _out="$(build_agent_cmd "" "simple task")"
 assert_contains "build_agent_cmd: starts with codex" "$_out" "codex"
@@ -872,16 +873,33 @@ assert_contains "build_agent_cmd: model flag present" "$_out" "--model o3"
 
 _out="$(build_agent_cmd "" "task with \"double quotes\"")"
 assert_eq "build_agent_cmd: double quotes preserved" \
-    "codex 'task with \"double quotes\"'" "$_out"
+    "codex --yolo 'task with \"double quotes\"'" "$_out"
 
 # Interactive mode (no task)
 _out="$(build_agent_cmd "" "")"
 assert_eq "build_agent_cmd: interactive mode" \
-    "codex" "$_out"
+    "codex --yolo" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "")"
 assert_eq "build_agent_cmd: interactive with model" \
-    "codex --model o4-mini" "$_out"
+    "codex --yolo --model o4-mini" "$_out"
+
+section "build_exec_agent_cmd — Worktree command construction"
+
+_out="$(build_exec_agent_cmd "" "fix the bug")"
+assert_eq "build_exec_agent_cmd: no model" \
+    "codex exec 'fix the bug'" "$_out"
+
+_out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
+assert_eq "build_exec_agent_cmd: with model" \
+    "codex exec --model gpt-5 'fix the bug'" "$_out"
+
+_out="$(build_exec_agent_cmd "o3" "it's a test")"
+assert_eq "build_exec_agent_cmd: single-quote escaping" \
+    "codex exec --model o3 'it'\\''s a test'" "$_out"
+
+_out="$(build_exec_agent_cmd "" "task")"
+assert_contains "build_exec_agent_cmd: uses codex exec" "$_out" "codex exec"
 
 ###############################################################################
 #                       ENSURE_CODEX_CONFIG                                   #
@@ -1877,6 +1895,478 @@ assert_ok "Resilience: daemon survives unwritable audit log" _run_resil_unwritab
 assert_ok "Resilience: daemon survives disappearing pane" _run_resil_pane_disappears
 assert_ok "Resilience: daemon logs its own exit via EXIT trap" _run_resil_exit_logged
 assert_ok "Resilience: daemon handles rapid sequential prompts" _run_resil_rapid_prompts
+
+###############################################################################
+#                  WORKTREE MANAGER                                           #
+###############################################################################
+
+section "worktree-manager.sh — Git helpers"
+
+_SAVED_SCRIPT_DIR="$SCRIPT_DIR"
+
+source "$SCRIPT_DIR/lib/worktree-manager.sh"
+eval "$(sed -n '/^check_pair()/,/^}/p' "$_SAVED_SCRIPT_DIR/lib/conflict-daemon.sh")"
+eval "$(sed -n '/^audit_merge()/,/^}/p; /^merge_branch()/,/^}/p' "$_SAVED_SCRIPT_DIR/lib/merge-resolver.sh")"
+
+SCRIPT_DIR="$_SAVED_SCRIPT_DIR"
+
+_git_test_user() {
+    git -C "$1" config user.name "test"
+    git -C "$1" config user.email "test@test"
+}
+
+_WT_REPO="/tmp/codex-yolo-test-repo-$$"
+_WT_SESSION="wt-test-$$"
+
+_wt_setup_repo() {
+    rm -rf "$_WT_REPO" "${_WT_REPO}-worktrees"
+    mkdir -p "$_WT_REPO"
+    git -C "$_WT_REPO" init -b main >/dev/null 2>&1
+    _git_test_user "$_WT_REPO"
+    git -C "$_WT_REPO" commit --allow-empty -m "initial" >/dev/null 2>&1
+    echo "hello" > "$_WT_REPO/file.txt"
+    git -C "$_WT_REPO" add file.txt >/dev/null 2>&1
+    git -C "$_WT_REPO" commit -m "add file" >/dev/null 2>&1
+}
+
+_wt_teardown() {
+    wt_cleanup "$_WT_SESSION" >/dev/null 2>&1 || true
+    rm -rf "$_WT_REPO" "${_WT_REPO}-worktrees"
+    rm -f "$(wt_state_file "$_WT_SESSION")" 2>/dev/null
+}
+
+_wt_setup_repo
+
+assert_ok "wt_validate_repo: valid git repo succeeds" \
+    wt_validate_repo "$_WT_REPO"
+
+assert_fail "wt_validate_repo: non-repo fails" \
+    wt_validate_repo "/tmp"
+
+_test_current_branch() {
+    local branch
+    branch="$(wt_current_branch "$_WT_REPO")"
+    [[ "$branch" == "main" ]]
+}
+assert_ok "wt_current_branch: returns current branch" _test_current_branch
+
+_test_repo_root() {
+    local root
+    root="$(wt_repo_root "$_WT_REPO")"
+    [[ "$root" == "$_WT_REPO" ]]
+}
+assert_ok "wt_repo_root: returns repo root" _test_repo_root
+
+_test_state_file_path() {
+    local sf
+    sf="$(wt_state_file "my-session")"
+    [[ "$sf" == *"codex-yolo-wt-my-session.state" ]]
+}
+assert_ok "wt_state_file: returns codex-yolo state path" _test_state_file_path
+
+_test_done_marker_path() {
+    local dm
+    dm="$(wt_done_marker "my-session" 3)"
+    [[ "$dm" == *"codex-yolo-done-my-session-3" ]]
+}
+assert_ok "wt_done_marker: returns codex-yolo marker path" _test_done_marker_path
+
+_test_base_dir() {
+    local bd
+    bd="$(wt_base_dir "/tmp/repo" "sess")"
+    [[ "$bd" == "/tmp/repo-worktrees/sess" ]]
+}
+assert_ok "wt_base_dir: returns sibling directory" _test_base_dir
+
+section "worktree-manager.sh — Create, list, cleanup"
+
+_test_create_all() {
+    _wt_teardown
+    _wt_setup_repo
+    wt_create_all "$_WT_REPO" "$_WT_SESSION" "main" 3 >/dev/null 2>&1
+}
+assert_ok "wt_create_all: creates worktrees" _test_create_all
+
+_test_state_file_header() {
+    local sf line1 line2
+    sf="$(wt_state_file "$_WT_SESSION")"
+    [[ -f "$sf" ]] || return 1
+    line1="$(head -1 "$sf")"
+    line2="$(sed -n '2p' "$sf")"
+    [[ "$line1" == "$_WT_REPO" && "$line2" == "main" ]]
+}
+assert_ok "wt_create_all: writes state header" _test_state_file_header
+
+_test_state_file_entries() {
+    local sf count
+    sf="$(wt_state_file "$_WT_SESSION")"
+    count="$(tail -n +3 "$sf" | wc -l)"
+    (( count == 3 ))
+}
+assert_ok "wt_create_all: writes one state entry per worktree" _test_state_file_entries
+
+_test_wt_dirs_exist() {
+    local base="${_WT_REPO}-worktrees/${_WT_SESSION}"
+    [[ -d "${base}/${_WT_SESSION}-1" ]] && \
+    [[ -d "${base}/${_WT_SESSION}-2" ]] && \
+    [[ -d "${base}/${_WT_SESSION}-3" ]]
+}
+assert_ok "wt_create_all: worktree directories exist" _test_wt_dirs_exist
+
+_test_wt_file_in_worktree() {
+    local base="${_WT_REPO}-worktrees/${_WT_SESSION}"
+    [[ -f "${base}/${_WT_SESSION}-1/file.txt" ]]
+}
+assert_ok "wt_create_all: worktree contains repo files" _test_wt_file_in_worktree
+
+_test_branches_exist() {
+    git -C "$_WT_REPO" rev-parse --verify "${_WT_SESSION}-1" >/dev/null 2>&1 && \
+    git -C "$_WT_REPO" rev-parse --verify "${_WT_SESSION}-2" >/dev/null 2>&1 && \
+    git -C "$_WT_REPO" rev-parse --verify "${_WT_SESSION}-3" >/dev/null 2>&1
+}
+assert_ok "wt_create_all: branches exist in git" _test_branches_exist
+
+_test_read_repo_dir() {
+    local rd
+    rd="$(wt_read_repo_dir "$_WT_SESSION")"
+    [[ "$rd" == "$_WT_REPO" ]]
+}
+assert_ok "wt_read_repo_dir: returns repo path" _test_read_repo_dir
+
+_test_read_base_branch() {
+    local bb
+    bb="$(wt_read_base_branch "$_WT_SESSION")"
+    [[ "$bb" == "main" ]]
+}
+assert_ok "wt_read_base_branch: returns base branch" _test_read_base_branch
+
+_test_list_count() {
+    local count
+    count="$(wt_list "$_WT_SESSION" | wc -l)"
+    (( count == 3 ))
+}
+assert_ok "wt_list: returns all entries" _test_list_count
+
+_test_path_for() {
+    local p
+    p="$(wt_path_for "$_WT_SESSION" 2)"
+    [[ "$p" == *"${_WT_SESSION}-2" ]]
+}
+assert_ok "wt_path_for: returns indexed path" _test_path_for
+
+_test_branch_for() {
+    local b
+    b="$(wt_branch_for "$_WT_SESSION" 2)"
+    [[ "$b" == "${_WT_SESSION}-2" ]]
+}
+assert_ok "wt_branch_for: returns indexed branch" _test_branch_for
+
+assert_fail "wt_list: nonexistent session fails" \
+    wt_list "nonexistent-session-xyz"
+
+_test_duplicate_branch() {
+    wt_create_all "$_WT_REPO" "$_WT_SESSION" "main" 3 >/dev/null 2>&1
+}
+assert_fail "wt_create_all: fails when branches already exist" _test_duplicate_branch
+
+_wt_teardown
+_wt_setup_repo
+wt_create_all "$_WT_REPO" "$_WT_SESSION" "main" 2 >/dev/null 2>&1
+
+_test_cleanup_removes_state() {
+    wt_cleanup "$_WT_SESSION" >/dev/null 2>&1
+    [[ ! -f "$(wt_state_file "$_WT_SESSION")" ]]
+}
+assert_ok "wt_cleanup: removes state file" _test_cleanup_removes_state
+
+_test_cleanup_removes_branches() {
+    ! git -C "$_WT_REPO" rev-parse --verify "${_WT_SESSION}-1" >/dev/null 2>&1 && \
+    ! git -C "$_WT_REPO" rev-parse --verify "${_WT_SESSION}-2" >/dev/null 2>&1
+}
+assert_ok "wt_cleanup: removes branches" _test_cleanup_removes_branches
+
+_test_cleanup_noop() {
+    wt_cleanup "nonexistent-session-xyz" >/dev/null 2>&1
+}
+assert_ok "wt_cleanup: no-op for nonexistent session" _test_cleanup_noop
+
+_test_cleanup_done_markers() {
+    wt_create_all "$_WT_REPO" "$_WT_SESSION" "main" 2 >/dev/null 2>&1
+    touch "$(wt_done_marker "$_WT_SESSION" 1)"
+    touch "$(wt_done_marker "$_WT_SESSION" 2)"
+    wt_cleanup "$_WT_SESSION" >/dev/null 2>&1
+    [[ ! -f "$(wt_done_marker "$_WT_SESSION" 1)" ]] && \
+    [[ ! -f "$(wt_done_marker "$_WT_SESSION" 2)" ]]
+}
+assert_ok "wt_cleanup: removes done markers" _test_cleanup_done_markers
+
+###############################################################################
+#                  CONFLICT DETECTION                                         #
+###############################################################################
+
+section "conflict-daemon.sh — check_pair"
+
+_wt_teardown
+_wt_setup_repo
+wt_create_all "$_WT_REPO" "$_WT_SESSION" "main" 3 >/dev/null 2>&1
+
+REPO_DIR="$_WT_REPO"
+
+_wt_make_conflicts() {
+    local base="${_WT_REPO}-worktrees/${_WT_SESSION}"
+    echo "change from agent 1" > "${base}/${_WT_SESSION}-1/file.txt"
+    git -C "${base}/${_WT_SESSION}-1" add file.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_SESSION}-1" commit -m "agent 1 edit" >/dev/null 2>&1
+
+    echo "change from agent 2" > "${base}/${_WT_SESSION}-2/file.txt"
+    git -C "${base}/${_WT_SESSION}-2" add file.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_SESSION}-2" commit -m "agent 2 edit" >/dev/null 2>&1
+}
+_wt_make_conflicts
+
+_test_conflict_detected() {
+    local details
+    details="$(check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-2")"
+    [[ "$details" == *"CONFLICT"* && "$details" == *"file.txt"* ]]
+}
+assert_ok "check_pair: detects conflicting branches" _test_conflict_detected
+
+_test_clean_merge() {
+    check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-3"
+}
+assert_fail "check_pair: clean merge returns failure status" _test_clean_merge
+
+_test_no_conflict_different_files() {
+    local base="${_WT_REPO}-worktrees/${_WT_SESSION}"
+    echo "new file from agent 3" > "${base}/${_WT_SESSION}-3/other.txt"
+    git -C "${base}/${_WT_SESSION}-3" add other.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_SESSION}-3" commit -m "agent 3 adds other file" >/dev/null 2>&1
+    check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-3"
+}
+assert_fail "check_pair: different-file changes merge cleanly" _test_no_conflict_different_files
+
+###############################################################################
+#                  MERGE RESOLUTION                                           #
+###############################################################################
+
+section "merge-resolver.sh — merge_branch"
+
+_MR_REPO="/tmp/codex-yolo-test-merge-$$"
+_MR_AUDIT="$(mktemp)"
+
+_mr_setup() {
+    rm -rf "$_MR_REPO"
+    mkdir -p "$_MR_REPO"
+    git -C "$_MR_REPO" init -b main >/dev/null 2>&1
+    _git_test_user "$_MR_REPO"
+    echo "base content" > "$_MR_REPO/file.txt"
+    git -C "$_MR_REPO" add file.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "initial" >/dev/null 2>&1
+}
+
+_mr_cleanup() {
+    rm -rf "$_MR_REPO"
+    rm -f "$_MR_AUDIT"
+}
+
+REPO_DIR_saved="$REPO_DIR"
+AUDIT_LOG_saved="${AUDIT_LOG:-}"
+BASE_BRANCH_saved="${BASE_BRANCH:-}"
+
+_mr_setup
+
+REPO_DIR="$_MR_REPO"
+AUDIT_LOG="$_MR_AUDIT"
+BASE_BRANCH="main"
+
+_test_ff_merge() {
+    git -C "$_MR_REPO" checkout -b "ff-branch" main >/dev/null 2>&1
+    echo "new content" > "$_MR_REPO/new.txt"
+    git -C "$_MR_REPO" add new.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "ff commit" >/dev/null 2>&1
+    git -C "$_MR_REPO" checkout main >/dev/null 2>&1
+    merge_branch "ff-branch" >/dev/null 2>&1
+}
+assert_ok "merge_branch: fast-forward merge succeeds" _test_ff_merge
+
+_test_ff_audit() {
+    local log
+    log="$(cat "$_MR_AUDIT")"
+    [[ "$log" == *"OK ff-branch merged cleanly"* ]]
+}
+assert_ok "merge_branch: audit logs clean merge" _test_ff_audit
+
+_test_divergent_clean() {
+    : > "$_MR_AUDIT"
+    git -C "$_MR_REPO" checkout -b "div-branch" main >/dev/null 2>&1
+    echo "divergent" > "$_MR_REPO/div.txt"
+    git -C "$_MR_REPO" add div.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "divergent commit" >/dev/null 2>&1
+    git -C "$_MR_REPO" checkout main >/dev/null 2>&1
+    echo "main change" > "$_MR_REPO/main-only.txt"
+    git -C "$_MR_REPO" add main-only.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "main commit" >/dev/null 2>&1
+    merge_branch "div-branch" >/dev/null 2>&1
+}
+assert_ok "merge_branch: divergent non-conflicting merge succeeds" _test_divergent_clean
+
+_test_conflict_merge() {
+    : > "$_MR_AUDIT"
+    git -C "$_MR_REPO" checkout -b "conflict-branch" main >/dev/null 2>&1
+    echo "conflict version A" > "$_MR_REPO/file.txt"
+    git -C "$_MR_REPO" add file.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "conflict A" >/dev/null 2>&1
+    git -C "$_MR_REPO" checkout main >/dev/null 2>&1
+    echo "conflict version B" > "$_MR_REPO/file.txt"
+    git -C "$_MR_REPO" add file.txt >/dev/null 2>&1
+    git -C "$_MR_REPO" commit -m "conflict B" >/dev/null 2>&1
+    merge_branch "conflict-branch" >/dev/null 2>&1
+}
+assert_fail "merge_branch: conflicting merge returns failure" _test_conflict_merge
+
+_test_conflict_audit() {
+    local log
+    log="$(cat "$_MR_AUDIT")"
+    [[ "$log" == *"CONFLICTS in conflict-branch"* ]]
+}
+assert_ok "merge_branch: audit logs conflict" _test_conflict_audit
+
+git -C "$_MR_REPO" merge --abort 2>/dev/null || true
+
+REPO_DIR="$REPO_DIR_saved"
+AUDIT_LOG="${AUDIT_LOG_saved}"
+BASE_BRANCH="${BASE_BRANCH_saved}"
+_mr_cleanup
+
+###############################################################################
+#                  WORKTREE LAUNCHER FLAGS                                    #
+###############################################################################
+
+section "codex-yolo — Worktree flag parsing"
+
+assert_ok "check_git_merge_tree: passes with supported git" check_git_merge_tree
+
+_test_help_worktree() {
+    local output
+    output="$(bash "$SCRIPT_DIR/codex-yolo" --help 2>&1)"
+    [[ "$output" == *"--worktree"* ]] && \
+    [[ "$output" == *"--base-branch"* ]] && \
+    [[ "$output" == *"--no-merge"* ]] && \
+    [[ "$output" == *"--no-cleanup"* ]] && \
+    [[ "$output" == *"--conflict-poll"* ]]
+}
+assert_ok "launcher: --help shows all worktree options" _test_help_worktree
+
+assert_fail "launcher: --worktree with one task fails" \
+    bash "$SCRIPT_DIR/codex-yolo" --worktree -d /tmp "single task"
+
+assert_fail "launcher: --worktree on non-git dir fails" \
+    bash "$SCRIPT_DIR/codex-yolo" --worktree -d /tmp "task1" "task2"
+
+_test_worktree_short_flag() {
+    local output
+    output="$(bash "$SCRIPT_DIR/codex-yolo" -w -d /tmp "task1" "task2" 2>&1)" || true
+    [[ "$output" == *"Not a git repository"* ]]
+}
+assert_ok "launcher: -w is alias for --worktree" _test_worktree_short_flag
+
+###############################################################################
+#                  INTEGRATION — WORKTREE LIFECYCLE                           #
+###############################################################################
+
+section "Integration — Worktree lifecycle"
+
+_WT_INTEG_REPO="/tmp/codex-yolo-test-integ-$$"
+_WT_INTEG_SESSION="wt-integ-$$"
+
+_wt_integ_cleanup() {
+    wt_cleanup "$_WT_INTEG_SESSION" >/dev/null 2>&1 || true
+    rm -rf "$_WT_INTEG_REPO" "${_WT_INTEG_REPO}-worktrees"
+}
+
+_test_full_lifecycle_no_conflict() {
+    _wt_integ_cleanup
+    mkdir -p "$_WT_INTEG_REPO"
+    git -C "$_WT_INTEG_REPO" init -b main >/dev/null 2>&1
+    _git_test_user "$_WT_INTEG_REPO"
+    echo "base" > "$_WT_INTEG_REPO/base.txt"
+    git -C "$_WT_INTEG_REPO" add base.txt >/dev/null 2>&1
+    git -C "$_WT_INTEG_REPO" commit -m "initial" >/dev/null 2>&1
+
+    wt_create_all "$_WT_INTEG_REPO" "$_WT_INTEG_SESSION" "main" 2 >/dev/null 2>&1 || return 1
+
+    local base="${_WT_INTEG_REPO}-worktrees/${_WT_INTEG_SESSION}"
+
+    echo "agent1" > "${base}/${_WT_INTEG_SESSION}-1/file-a.txt"
+    git -C "${base}/${_WT_INTEG_SESSION}-1" add file-a.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_INTEG_SESSION}-1" commit -m "agent 1" >/dev/null 2>&1
+
+    echo "agent2" > "${base}/${_WT_INTEG_SESSION}-2/file-b.txt"
+    git -C "${base}/${_WT_INTEG_SESSION}-2" add file-b.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_INTEG_SESSION}-2" commit -m "agent 2" >/dev/null 2>&1
+
+    local rc=0
+    git -C "$_WT_INTEG_REPO" merge-tree --write-tree "${_WT_INTEG_SESSION}-1" "${_WT_INTEG_SESSION}-2" >/dev/null 2>&1 || rc=$?
+    (( rc == 0 )) || return 1
+
+    git -C "$_WT_INTEG_REPO" checkout main >/dev/null 2>&1
+    git -C "$_WT_INTEG_REPO" merge --no-edit "${_WT_INTEG_SESSION}-1" >/dev/null 2>&1 || return 1
+    git -C "$_WT_INTEG_REPO" merge --no-edit "${_WT_INTEG_SESSION}-2" >/dev/null 2>&1 || return 1
+
+    [[ -f "$_WT_INTEG_REPO/file-a.txt" ]] && [[ -f "$_WT_INTEG_REPO/file-b.txt" ]] || return 1
+
+    wt_cleanup "$_WT_INTEG_SESSION" >/dev/null 2>&1
+
+    [[ ! -f "$(wt_state_file "$_WT_INTEG_SESSION")" ]] && \
+    ! git -C "$_WT_INTEG_REPO" rev-parse --verify "${_WT_INTEG_SESSION}-1" >/dev/null 2>&1
+}
+assert_ok "lifecycle: create → commit no-conflict → merge → cleanup" _test_full_lifecycle_no_conflict
+
+_test_full_lifecycle_with_conflict() {
+    _wt_integ_cleanup
+    mkdir -p "$_WT_INTEG_REPO"
+    git -C "$_WT_INTEG_REPO" init -b main >/dev/null 2>&1
+    _git_test_user "$_WT_INTEG_REPO"
+    echo "original" > "$_WT_INTEG_REPO/shared.txt"
+    git -C "$_WT_INTEG_REPO" add shared.txt >/dev/null 2>&1
+    git -C "$_WT_INTEG_REPO" commit -m "initial" >/dev/null 2>&1
+
+    wt_create_all "$_WT_INTEG_REPO" "$_WT_INTEG_SESSION" "main" 2 >/dev/null 2>&1 || return 1
+
+    local base="${_WT_INTEG_REPO}-worktrees/${_WT_INTEG_SESSION}"
+
+    echo "agent1 version" > "${base}/${_WT_INTEG_SESSION}-1/shared.txt"
+    git -C "${base}/${_WT_INTEG_SESSION}-1" add shared.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_INTEG_SESSION}-1" commit -m "agent 1 edit" >/dev/null 2>&1
+
+    echo "agent2 version" > "${base}/${_WT_INTEG_SESSION}-2/shared.txt"
+    git -C "${base}/${_WT_INTEG_SESSION}-2" add shared.txt >/dev/null 2>&1
+    git -C "${base}/${_WT_INTEG_SESSION}-2" commit -m "agent 2 edit" >/dev/null 2>&1
+
+    local rc=0
+    git -C "$_WT_INTEG_REPO" merge-tree --write-tree "${_WT_INTEG_SESSION}-1" "${_WT_INTEG_SESSION}-2" >/dev/null 2>&1 || rc=$?
+    (( rc == 1 )) || return 1
+
+    git -C "$_WT_INTEG_REPO" checkout main >/dev/null 2>&1
+    git -C "$_WT_INTEG_REPO" merge --no-edit "${_WT_INTEG_SESSION}-1" >/dev/null 2>&1 || return 1
+
+    local merge_rc=0
+    git -C "$_WT_INTEG_REPO" merge --no-edit "${_WT_INTEG_SESSION}-2" >/dev/null 2>&1 || merge_rc=$?
+    (( merge_rc != 0 )) || return 1
+
+    local unmerged
+    unmerged="$(git -C "$_WT_INTEG_REPO" diff --name-only --diff-filter=U 2>/dev/null)"
+    [[ "$unmerged" == *"shared.txt"* ]] || return 1
+
+    git -C "$_WT_INTEG_REPO" merge --abort 2>/dev/null || true
+
+    wt_cleanup "$_WT_INTEG_SESSION" >/dev/null 2>&1
+    _wt_integ_cleanup
+}
+assert_ok "lifecycle: create → commit with conflict → detect → abort → cleanup" _test_full_lifecycle_with_conflict
+
+_wt_teardown
+_wt_integ_cleanup 2>/dev/null || true
 
 ###############################################################################
 #                          SUMMARY                                            #

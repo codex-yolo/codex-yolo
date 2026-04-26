@@ -205,8 +205,8 @@ if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
     fi
 elif [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing installation in $INSTALL_DIR"
-    git -C "$INSTALL_DIR" checkout . 2>/dev/null
-    git -C "$INSTALL_DIR" pull --ff-only || error "Failed to update. Resolve manually in $INSTALL_DIR"
+    git -C "$INSTALL_DIR" fetch origin 2>/dev/null
+    git -C "$INSTALL_DIR" reset --hard origin/main 2>/dev/null || error "Failed to update. Resolve manually in $INSTALL_DIR"
 else
     if [[ -d "$INSTALL_DIR" ]]; then
         error "$INSTALL_DIR already exists but is not a git repo. Remove it first and re-run."
@@ -243,6 +243,7 @@ _detect_shell() {
     fi
     echo "$sh_name"
 }
+
 SHELL_NAME="$(_detect_shell)"
 case "$SHELL_NAME" in
     zsh)  RC_FILE="$HOME/.zshrc" ;;

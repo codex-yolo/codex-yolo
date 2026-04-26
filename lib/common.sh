@@ -56,6 +56,15 @@ resolve_script_dir() {
     echo "$dir"
 }
 
+# Check if git supports merge-tree --write-tree (requires git 2.38+).
+check_git_merge_tree() {
+    local version
+    version="$(git version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+')" || return 1
+    local major minor
+    IFS='.' read -r major minor <<< "$version"
+    (( major > 2 || (major == 2 && minor >= 38) ))
+}
+
 # Ensure the Codex CLI config directory and config.toml exist.
 # Does NOT override approval_policy (the daemon handles prompts at the terminal level).
 # This just ensures the config directory is present so Codex doesn't error on first run.

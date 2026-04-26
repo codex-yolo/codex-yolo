@@ -15,6 +15,11 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
 
+      - name: Configure git for tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@test"
+
       - name: Create codex CLI stub
         run: |
           printf '#!/bin/sh\necho "codex stub"\n' | sudo tee /usr/local/bin/codex >/dev/null

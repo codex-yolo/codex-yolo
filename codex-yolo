@@ -23,12 +23,20 @@ Options:
   -r, --resume          Re-attach to an existing yolo session
   -h, --help            Show this help
 
+Worktree options:
+  -w, --worktree          Run each agent in its own git worktree
+  --base-branch BRANCH    Base branch for worktrees (default: current branch)
+  --no-merge              Skip auto-merge after agents complete
+  --no-cleanup            Keep worktrees after merge
+  --conflict-poll SECS    Conflict detection interval (default: 5)
+
 Examples:
   codex-yolo                     # interactive codex with auto-approval
   codex-yolo "fix the login bug" "add unit tests for auth"
   codex-yolo --model o4-mini --dir /my/project "refactor the API layer"
   codex-yolo --file prompt.txt
   codex-yolo --resume
+  codex-yolo -w -s feat -d /repo "add auth" "add tests" "add docs"
 EOF
 }
 
@@ -45,6 +53,7 @@ tmux_attach() {
 
 main() {
     local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
+    local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local tasks=()
 
     # Parse arguments
@@ -55,6 +64,11 @@ main() {
             -m|--model)    model="$2"; shift 2 ;;
             -p|--poll)     poll_interval="$2"; shift 2 ;;
             -f|--file)     prompt_file="$2"; shift 2 ;;
+            -w|--worktree)     worktree_mode=1; shift ;;
+            --base-branch)     base_branch="$2"; shift 2 ;;
+            --no-merge)        no_merge=1; shift ;;
+            --no-cleanup)      no_cleanup=1; shift ;;
+            --conflict-poll)   conflict_poll="$2"; shift 2 ;;
             -r|--resume)   resume=1; shift ;;
             -h|--help)     usage; exit 0 ;;
             -*)            log_error "Unknown option: $1"; usage; exit 1 ;;
@@ -114,6 +128,28 @@ main() {
     # Ensure Codex CLI config directory exists
     ensure_codex_config
 
+    # ── worktree setup ───────────────────────────────────────────────────────
+    if (( worktree_mode )); then
+        source "$SCRIPT_DIR/lib/worktree-manager.sh"
+
+        wt_validate_repo "$work_dir" || exit 1
+
+        if ! check_git_merge_tree; then
+            log_error "git 2.38+ required for merge-tree --write-tree (found: $(git version))"
+            exit 1
+        fi
+
+        if [[ ${#tasks[@]} -lt 2 ]]; then
+            log_error "Worktree mode requires at least 2 tasks"
+            exit 1
+        fi
+
+        base_branch="${base_branch:-$(wt_current_branch "$work_dir")}"
+        log_info "Creating ${#tasks[@]} worktrees from branch: $base_branch"
+
+        wt_create_all "$work_dir" "$SESSION_NAME" "$base_branch" "${#tasks[@]}" || exit 1
+    fi
+
     # Truncate audit log for this run
     : > "$AUDIT_LOG"
 
@@ -123,10 +159,23 @@ main() {
 
     # Create detached tmux session with first agent window
     local first_task="${tasks[0]}"
+    local agent_dir="$work_dir"
     local cmd
-    cmd="$(build_agent_cmd "$model" "$first_task")"
 
-    tmux new-session -d -s "$SESSION_NAME" -n "agent-1" -c "$work_dir"
+    if (( worktree_mode )); then
+        agent_dir="$(wt_path_for "$SESSION_NAME" 1)"
+    fi
+
+    if (( worktree_mode )); then
+        cmd="$(build_exec_agent_cmd "$model" "$first_task")"
+    else
+        cmd="$(build_agent_cmd "$model" "$first_task")"
+    fi
+    if (( worktree_mode )); then
+        cmd="$cmd ; touch '$(wt_done_marker "$SESSION_NAME" 1)'"
+    fi
+
+    tmux new-session -d -s "$SESSION_NAME" -n "agent-1" -c "$agent_dir"
     tmux send-keys -t "$SESSION_NAME:agent-1" "$cmd" C-m
 
     log_info "Started agent-1: ${first_task:+${first_task:0:60}...}${first_task:-interactive}"
@@ -136,9 +185,22 @@ main() {
     for (( i=1; i<${#tasks[@]}; i++ )); do
         local win_name="agent-$((i+1))"
         local task="${tasks[$i]}"
-        cmd="$(build_agent_cmd "$model" "$task")"
+        agent_dir="$work_dir"
 
-        tmux new-window -t "$SESSION_NAME" -n "$win_name" -c "$work_dir"
+        if (( worktree_mode )); then
+            agent_dir="$(wt_path_for "$SESSION_NAME" $((i+1)))"
+        fi
+
+        if (( worktree_mode )); then
+            cmd="$(build_exec_agent_cmd "$model" "$task")"
+        else
+            cmd="$(build_agent_cmd "$model" "$task")"
+        fi
+        if (( worktree_mode )); then
+            cmd="$cmd ; touch '$(wt_done_marker "$SESSION_NAME" $((i+1)))'"
+        fi
+
+        tmux new-window -t "$SESSION_NAME" -n "$win_name" -c "$agent_dir"
         tmux send-keys -t "$SESSION_NAME:$win_name" "$cmd" C-m
 
         log_info "Started $win_name: ${task:+${task:0:60}...}${task:-interactive}"
@@ -150,6 +212,24 @@ main() {
     nohup bash "$SCRIPT_DIR/lib/approver-daemon.sh" "$SESSION_NAME" "$poll_interval" "$AUDIT_LOG" \
         >/dev/null 2>&1 &
     disown
+
+    # ── worktree daemons ─────────────────────────────────────────────────────
+    if (( worktree_mode )); then
+        log_info "Starting conflict daemon (poll=${conflict_poll}s)"
+        nohup bash "$SCRIPT_DIR/lib/conflict-daemon.sh" "$SESSION_NAME" "$conflict_poll" "$AUDIT_LOG" \
+            >/dev/null 2>&1 &
+        disown
+
+        if (( ! no_merge )); then
+            local merge_opts=""
+            (( no_cleanup )) && merge_opts="$merge_opts --no-cleanup"
+            [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
+
+            tmux new-window -t "$SESSION_NAME" -n "merge" -c "$work_dir"
+            tmux send-keys -t "$SESSION_NAME:merge" \
+                "bash '$SCRIPT_DIR/lib/merge-resolver.sh' '$SESSION_NAME' '$AUDIT_LOG' $merge_opts" C-m
+        fi
+    fi
 
     # Create control window tailing the audit log
     tmux new-window -t "$SESSION_NAME" -n "control" -c "$work_dir"
@@ -190,6 +270,28 @@ build_agent_cmd() {
     fi
 
     # Escape single quotes in the task for shell safety
+    local escaped_task="${task//\'/\'\\\'\'}"
+    cmd="$cmd '$escaped_task'"
+
+    echo "$cmd"
+}
+
+build_exec_agent_cmd() {
+    local model="$1" task="$2"
+    local cmd="codex exec"
+
+    if [[ -n "$model" ]]; then
+        cmd="$cmd --model $model"
+    fi
+
+    if [[ "$task" == *$'\n'* ]]; then
+        local tmpfile
+        tmpfile="/tmp/codex-yolo-prompt-$RANDOM$RANDOM.txt"
+        printf '%s' "$task" > "$tmpfile"
+        echo "cat '$tmpfile' | $cmd -"
+        return
+    fi
+
     local escaped_task="${task//\'/\'\\\'\'}"
     cmd="$cmd '$escaped_task'"
 

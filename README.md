@@ -5,18 +5,20 @@
 
 # codex-yolo
 
-Run parallel OpenAI Codex CLI agents in tmux with automatic permission approval.
+Run parallel OpenAI Codex CLI agents in tmux with automatic permission approval. Optionally isolate each agent in its own git worktree with real-time merge conflict detection and automated conflict resolution.
 
-When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts the user before running commands, applying edits, or accessing the network. This tool auto-approves those prompts at the terminal level using `tmux capture-pane` + `send-keys`, while preserving sandbox protection.
+When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts the user before running commands, applying edits, or accessing the network. Standard agent windows are launched with Codex's `--yolo` mode for maximum automation; the tmux approver daemon remains in place for prompt styles that still appear.
 
 ## Table of contents
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Worktree mode](#worktree-mode)
 - [Navigation](#navigation)
 - [Options](#options)
 - [How it works](#how-it-works)
   - [Detection signals](#detection-signals)
+  - [Worktree pipeline](#worktree-pipeline)
 - [File structure](#file-structure)
 - [Prerequisites](#prerequisites)
 - [Testing](#testing)
@@ -76,6 +78,34 @@ codex-yolo -d /path/to/project "run the test suite and fix failures"
 
 Once launched, you're inside a tmux session with one window per agent. The last window (`control`) tails the audit log in real time.
 
+## Worktree mode
+
+With `--worktree` (`-w`), each agent gets its own git worktree and branch so parallel tasks do not overwrite each other's files:
+
+```bash
+codex-yolo -w -s feat -d /path/to/repo \
+  "implement auth system" \
+  "add database migrations" \
+  "write API tests"
+```
+
+This creates worktrees under `<repo>-worktrees/<session>/`, runs each task with `codex exec`, polls branch pairs with `git merge-tree`, and opens a `merge` window that waits for agents to finish before merging the branches back into the base branch.
+
+Skip auto-merge to inspect worktrees manually:
+
+```bash
+codex-yolo -w --no-merge -s feat -d /repo "task1" "task2"
+
+git diff main..feat-1
+git diff main..feat-2
+git checkout main && git merge feat-1 && git merge feat-2
+
+source ~/.codex-yolo/lib/worktree-manager.sh
+wt_cleanup feat
+```
+
+See [docs/worktree-mode-demo.md](docs/worktree-mode-demo.md) for a complete demo.
+
 ## Navigation
 
 | Key | Action |
@@ -100,19 +130,34 @@ Re-attach later with `codex-yolo -r` (or `codex-yolo --resume`).
 -r, --resume          Re-attach to an existing yolo session
 -h, --help            Show help
 
+Worktree options:
+-w, --worktree          Run each agent in its own git worktree
+--base-branch BRANCH    Base branch for worktrees (default: current branch)
+--no-merge              Skip auto-merge after agents complete
+--no-cleanup            Keep worktrees after merge
+--conflict-poll SECS    Conflict detection interval (default: 5)
+
 install.sh options:
 --local               Install from the local repo without pulling from GitHub
 ```
 
 ## How it works
 
-1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex`.
+1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode.
 2. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
    - Detects six prompt styles (see below)
    - Sends `Enter` via `tmux send-keys` to confirm the pre-selected first option (always the approval option)
    - Applies a 2-second per-pane cooldown to prevent double-approvals
 3. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval with timestamp, pane ID, and matched pattern. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
+
+### Worktree pipeline
+
+When `--worktree` is enabled, three additional components run alongside the approver:
+
+1. **Worktree manager** (`lib/worktree-manager.sh`) creates a branch and git worktree per agent in `<repo>-worktrees/<session>/`.
+2. **Conflict daemon** (`lib/conflict-daemon.sh`) polls every `--conflict-poll` seconds and runs `git merge-tree --write-tree` across branch pairs. Conflicts are logged to the audit log.
+3. **Merge resolver** (`lib/merge-resolver.sh`) waits for `codex exec` agents to finish, auto-commits uncommitted changes, merges branches into the base branch, and starts a Codex resolver task if a merge conflict occurs.
 
 ### Detection signals
 
@@ -143,14 +188,20 @@ codex-yolo               # Main launcher script
 lib/
   common.sh              # Logging, prerequisite checks
   approver-daemon.sh     # tmux capture-pane monitor + auto-approver
-test_approver.sh         # Test suite (109 tests)
+  worktree-manager.sh    # Git worktree lifecycle
+  conflict-daemon.sh     # Real-time conflict detection via git merge-tree
+  merge-resolver.sh      # Sequential merge + Codex-powered conflict resolution
+test_approver.sh         # Test suite
 install.sh               # Cross-platform installer
+docs/
+  worktree-mode-demo.md  # Step-by-step worktree demo
 ```
 
 ## Prerequisites
 
 - **tmux** (tested with 3.4)
 - **codex** (OpenAI Codex CLI — `npm install -g @openai/codex`)
+- **git** 2.38+ (required for worktree mode — `git merge-tree --write-tree`)
 
 ## Testing
 
@@ -175,11 +226,15 @@ The test suite covers:
 - Cooldown logic, command construction, audit logging
 - End-to-end integration tests using real tmux sessions
 - Concurrent daemon isolation (no crosstalk between sessions)
+- Worktree creation, cleanup, conflict detection, and merge behavior
 
 ## Key features
 
 - **Parallel multi-agent execution** — Uniquely enables parallel execution of multiple Codex CLI agents in tmux with non-invasive, terminal-level auto-approval of permissions.
-- **Sandbox-preserving** — Unlike `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`), this approach auto-approves prompts while keeping Codex's OS-level sandbox (Landlock/seccomp on Linux, Seatbelt on macOS) active.
+- **Git worktree isolation** — Each agent can work in its own branch and worktree, then merge back into the base branch.
+- **Real-time conflict detection** — A background daemon polls `git merge-tree` across all branch pairs and logs conflicts as they emerge.
+- **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
+- **Convenience-first automation** — Standard sessions use Codex `--yolo`, so this is intended only for isolated environments where broad command execution is acceptable.
 - **Comprehensive detection logic** — Handles all six Codex CLI prompt types plus MCP elicitation using a multi-signal approach that minimizes false positives.
 - **Reliability and traceability** — Per-pane cooldowns, detailed audit logging, and an extensive test suite emphasize reliability and traceability.
 - **No CLI patching or containerization** — Works entirely at the terminal level without modifying the Codex binary or wrapping it in containers.
@@ -196,4 +251,4 @@ This tool was built by adapting the [claude-yolo](https://github.com/claude-yolo
 
 4. **Per-pane cooldown**: Without a cooldown, the 0.3s poll interval can send multiple `Enter` keystrokes for the same prompt. A 2-second per-pane cooldown prevents double-approvals.
 
-5. **Sandbox preservation**: Codex CLI has three approval policies (`untrusted`, `on-request`, `never`) and independent sandbox modes. The `--yolo` flag sets both to maximum permissiveness. This tool only auto-approves prompts, leaving the sandbox intact — you get the convenience of auto-approval with the safety of OS-level sandboxing.
+5. **Automation mode**: Codex CLI has approval policies and independent sandbox modes. Current `codex-yolo` standard sessions pass `--yolo`, which prioritizes automation over sandbox preservation. Use dedicated, isolated environments.
