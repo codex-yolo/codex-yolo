@@ -15,6 +15,11 @@ done
 REPO="https://github.com/codex-yolo/codex-yolo.git"
 INSTALL_DIR="${CODEX_YOLO_HOME:-$HOME/.codex-yolo}"
 BIN_DIR="$HOME/.local/bin"
+NPM_PREFIX="${CODEX_YOLO_NPM_PREFIX:-$HOME/.local}"
+ORIGINAL_PATH="${PATH:-}"
+
+# Make user-prefix npm installs visible during this script, not just after it.
+export PATH="$BIN_DIR:$ORIGINAL_PATH"
 
 # Colors (disabled if not a terminal)
 if [[ -t 1 ]]; then
@@ -33,15 +38,35 @@ if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d /data/data/com.termux ]]; then
     IS_TERMUX=1
 fi
 
-# Use sudo only if not already root and sudo is available
+# Use sudo only if it is actually usable. Some locked-down systems have sudo
+# installed even though the current user is not allowed to run it.
 SUDO=""
-if [[ "$IS_TERMUX" -eq 0 ]] && [[ "$(id -u)" -ne 0 ]]; then
-    if command -v sudo &>/dev/null; then
-        SUDO="sudo"
-    else
-        warn "Not running as root and sudo is not available — package installs may fail"
-    fi
+CAN_INSTALL_SYSTEM_PACKAGES=0
+if [[ "$IS_TERMUX" -eq 1 ]]; then
+    :
+elif [[ "$(id -u)" -eq 0 ]]; then
+    CAN_INSTALL_SYSTEM_PACKAGES=1
+elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+    SUDO="sudo"
+    CAN_INSTALL_SYSTEM_PACKAGES=1
+else
+    warn "sudo is not available or not allowed — using user-space installs only"
 fi
+
+require_system_pkg_install() {
+    local pkg="$1"
+    if [[ "$CAN_INSTALL_SYSTEM_PACKAGES" -ne 1 ]]; then
+        error "$pkg is required, but this user cannot install system packages without sudo. Install $pkg manually and re-run."
+    fi
+}
+
+run_as_root() {
+    if [[ -n "$SUDO" ]]; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
 
 # Install a package using the appropriate package manager
 # Usage: install_pkg <package_name>
@@ -58,15 +83,20 @@ install_pkg() {
         if [[ "$IS_TERMUX" -eq 1 ]]; then
             pkg install -y "$pkg"
         elif command -v apt-get &>/dev/null; then
-            $SUDO apt-get update && $SUDO apt-get install -y "$pkg"
+            require_system_pkg_install "$pkg"
+            run_as_root apt-get update && run_as_root apt-get install -y "$pkg"
         elif command -v dnf &>/dev/null; then
-            $SUDO dnf install -y "$pkg"
+            require_system_pkg_install "$pkg"
+            run_as_root dnf install -y "$pkg"
         elif command -v yum &>/dev/null; then
-            $SUDO yum install -y "$pkg"
+            require_system_pkg_install "$pkg"
+            run_as_root yum install -y "$pkg"
         elif command -v pacman &>/dev/null; then
-            $SUDO pacman -S --noconfirm "$pkg"
+            require_system_pkg_install "$pkg"
+            run_as_root pacman -S --noconfirm "$pkg"
         elif command -v apk &>/dev/null; then
-            $SUDO apk add "$pkg"
+            require_system_pkg_install "$pkg"
+            run_as_root apk add "$pkg"
         else
             error "$pkg is required but no supported package manager found. Install $pkg manually."
         fi
@@ -133,6 +163,19 @@ if ! command -v codex &>/dev/null; then
     info "Codex CLI is not installed — installing"
     CODEX_INSTALLED=0
 
+    _npm_global_install() {
+        local pkg="$1"
+        npm install -g "$pkg" 2>/dev/null && return 0
+        mkdir -p "$NPM_PREFIX"
+        npm install -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null
+    }
+
+    _npm_global_uninstall() {
+        local pkg="$1"
+        npm uninstall -g "$pkg" 2>/dev/null || true
+        npm uninstall -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null || true
+    }
+
     _ensure_npm() {
         if command -v npm &>/dev/null; then return 0; fi
         info "npm is not installed — attempting to install Node.js"
@@ -147,40 +190,42 @@ if ! command -v codex &>/dev/null; then
 
     _ensure_npm
     if command -v npm &>/dev/null; then
-        npm install -g @openai/codex 2>/dev/null && CODEX_INSTALLED=1
+        _npm_global_install @openai/codex && CODEX_INSTALLED=1
     fi
 
     # Verify codex actually works (some platforms install but fail at runtime)
     if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
         warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
-        npm uninstall -g @openai/codex 2>/dev/null || true
-        npm install -g @mmmbuto/codex-cli-termux 2>/dev/null && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
+        _npm_global_uninstall @openai/codex
+        _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
     fi
 
     # If distro Node.js failed (common on aarch64 with 64KB pages),
     # try NodeSource v22 with proper Node.js
-    if [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null; then
+    if [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null && [[ "$CAN_INSTALL_SYSTEM_PACKAGES" -eq 1 ]]; then
         warn "npm install failed — trying with Node.js 22 via NodeSource"
         # Remove conflicting distro Node.js packages before installing NodeSource
-        $SUDO apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
-        $SUDO apt-get autoremove -y 2>/dev/null || true
+        run_as_root apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
+        run_as_root apt-get autoremove -y 2>/dev/null || true
         if curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh 2>/dev/null; then
-            $SUDO bash /tmp/nodesource_setup.sh 2>/dev/null
+            run_as_root bash /tmp/nodesource_setup.sh 2>/dev/null
             # Use --force-overwrite in case distro libnode-dev wasn't fully removed
-            $SUDO apt-get install -y -o Dpkg::Options::="--force-overwrite" nodejs 2>/dev/null
+            run_as_root apt-get install -y -o Dpkg::Options::="--force-overwrite" nodejs 2>/dev/null
             rm -f /tmp/nodesource_setup.sh
         fi
         if command -v npm &>/dev/null; then
-            npm install -g @openai/codex 2>/dev/null && CODEX_INSTALLED=1
+            _npm_global_install @openai/codex && CODEX_INSTALLED=1
             # Verify codex works after NodeSource install too
             if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
                 warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
-                npm uninstall -g @openai/codex 2>/dev/null || true
-                npm install -g @mmmbuto/codex-cli-termux 2>/dev/null && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
+                _npm_global_uninstall @openai/codex
+                _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
             fi
         else
             warn "npm is not available — cannot install Codex CLI"
         fi
+    elif [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null; then
+        warn "Skipping NodeSource fallback because sudo/root package access is unavailable"
     fi
 
     if ! command -v codex &>/dev/null; then
@@ -252,7 +297,7 @@ case "$SHELL_NAME" in
     *)    RC_FILE="$HOME/.profile" ;;
 esac
 
-if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
+if ! echo "$ORIGINAL_PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
     EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
     if [[ "$SHELL_NAME" == "fish" ]]; then
         EXPORT_LINE='fish_add_path $HOME/.local/bin'
