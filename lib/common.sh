@@ -30,6 +30,8 @@ CODEX_YOLO_SANDBOX_PROBE_MESSAGE="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE:-}"
 CODEX_YOLO_CONTAINER_DETECTED="${CODEX_YOLO_CONTAINER_DETECTED:-}"
 CODEX_YOLO_FAKE_BWRAP_DIR="${CODEX_YOLO_FAKE_BWRAP_DIR:-}"
 CODEX_YOLO_FAKE_BWRAP_ENABLED="${CODEX_YOLO_FAKE_BWRAP_ENABLED:-0}"
+CODEX_YOLO_PERMISSION_PROFILE="${CODEX_YOLO_PERMISSION_PROFILE:-}"
+CODEX_YOLO_FULL_ACCESS_ALLOWED="${CODEX_YOLO_FULL_ACCESS_ALLOWED:-}"
 
 check_prereqs() {
     local missing=0
@@ -132,6 +134,112 @@ codex_yolo_command_prefix() {
 
     local dir="${CODEX_YOLO_FAKE_BWRAP_DIR//\'/\'\\\'\'}"
     printf "PATH='%s':\"\$PATH\" " "$dir"
+}
+
+codex_yolo_full_access_allowed() {
+    if [[ -n "${CODEX_YOLO_FULL_ACCESS_ALLOWED:-}" ]]; then
+        [[ "$CODEX_YOLO_FULL_ACCESS_ALLOWED" == "1" ]]
+        return
+    fi
+
+    local cache_file="$HOME/.codex/cloud-requirements-cache.json"
+    [[ -f "$cache_file" ]] || return 0
+
+    local host
+    host="$(hostname 2>/dev/null || true)"
+
+    if command -v python3 >/dev/null 2>&1; then
+        local rc=0
+        if python3 - "$cache_file" "$host" <<'PY'
+import fnmatch
+import json
+import re
+import sys
+
+cache_file, host = sys.argv[1], sys.argv[2]
+try:
+    with open(cache_file, "r", encoding="utf-8") as f:
+        contents = json.load(f).get("signed_payload", {}).get("contents", "")
+except Exception:
+    sys.exit(2)
+
+def modes(block):
+    match = re.search(r"allowed_sandbox_modes\s*=\s*\[(.*?)\]", block, re.S)
+    if not match:
+        return None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+parts = contents.split("[[remote_sandbox_config]]")
+top_modes = modes(parts[0])
+if top_modes is not None and "danger-full-access" in top_modes:
+    sys.exit(0)
+
+for block in parts[1:]:
+    match = re.search(r"hostname_patterns\s*=\s*\[(.*?)\]", block, re.S)
+    if not match:
+        continue
+    patterns = re.findall(r'"([^"]+)"', match.group(1))
+    if any(fnmatch.fnmatch(host, pattern) for pattern in patterns):
+        block_modes = modes(block)
+        if block_modes is None:
+            continue
+        sys.exit(0 if "danger-full-access" in block_modes else 1)
+
+if top_modes is None:
+    sys.exit(2)
+sys.exit(1)
+PY
+        then
+            return 0
+        else
+            rc=$?
+        fi
+        case $rc in
+            1) return 1 ;;
+        esac
+    fi
+
+    # If the requirements cache cannot be parsed, optimistically request Full Access.
+    # Codex will still enforce any managed requirements at startup.
+    return 0
+}
+
+configure_codex_permissions() {
+    local policy="${1:-auto}"
+
+    case "$policy" in
+        auto|"")
+            if codex_yolo_full_access_allowed; then
+                CODEX_YOLO_PERMISSION_PROFILE="full-access"
+                log_info "Codex permissions default: Full Access"
+            else
+                CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+                log_info "Codex permissions default: Auto-review (Full Access unavailable)"
+            fi
+            ;;
+        full-access|codex-auto-review)
+            CODEX_YOLO_PERMISSION_PROFILE="$policy"
+            ;;
+        auto-review)
+            CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+            ;;
+        none|default|off)
+            CODEX_YOLO_PERMISSION_PROFILE=""
+            ;;
+        *)
+            log_error "Unknown Codex permissions profile: $policy"
+            return 1
+            ;;
+    esac
+
+    export CODEX_YOLO_PERMISSION_PROFILE
+}
+
+codex_yolo_permission_config_arg() {
+    [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] || return 0
+
+    local profile="${CODEX_YOLO_PERMISSION_PROFILE//\"/\\\"}"
+    printf -- "-c 'permission_profile=\"%s\"' " "$profile"
 }
 
 codex_linux_sandbox_works() {

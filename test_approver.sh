@@ -884,6 +884,13 @@ _out="$(build_agent_cmd "o4-mini" "")"
 assert_eq "build_agent_cmd: interactive with model" \
     "codex --yolo --model o4-mini" "$_out"
 
+CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+_out="$(build_agent_cmd "" "fix the bug")"
+assert_eq "build_agent_cmd: permission profile" \
+    "codex --yolo -c 'permission_profile=\"codex-auto-review\"' 'fix the bug'" "$_out"
+
+CODEX_YOLO_PERMISSION_PROFILE=""
+
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 _out="$(build_agent_cmd "" "fix the bug")"
@@ -916,6 +923,13 @@ assert_eq "build_exec_agent_cmd: single-quote escaping" \
 _out="$(build_exec_agent_cmd "" "task")"
 assert_contains "build_exec_agent_cmd: uses codex exec" "$_out" "codex exec"
 
+CODEX_YOLO_PERMISSION_PROFILE="full-access"
+_out="$(build_exec_agent_cmd "" "fix the bug")"
+assert_eq "build_exec_agent_cmd: permission profile" \
+    "codex exec -c 'permission_profile=\"full-access\"' 'fix the bug'" "$_out"
+
+CODEX_YOLO_PERMISSION_PROFILE=""
+
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
 _out="$(build_exec_agent_cmd "" "fix the bug")"
 assert_eq "build_exec_agent_cmd: no Codex sandbox uses explicit bypass" \
@@ -931,6 +945,78 @@ CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
+CODEX_YOLO_PERMISSION_PROFILE=""
+
+section "configure_codex_permissions — Permission profile defaults"
+
+_test_configure_permissions_full_access_allowed() {
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=1
+    CODEX_YOLO_PERMISSION_PROFILE=""
+
+    configure_codex_permissions auto >/dev/null 2>&1 || return 1
+
+    local result=1
+    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "full-access" ]] && result=0
+
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    return $result
+}
+
+_test_configure_permissions_full_access_disabled() {
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=0
+    CODEX_YOLO_PERMISSION_PROFILE=""
+
+    configure_codex_permissions auto >/dev/null 2>&1 || return 1
+
+    local result=1
+    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]] && result=0
+
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    return $result
+}
+
+_test_configure_permissions_auto_review_alias() {
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    configure_codex_permissions auto-review >/dev/null 2>&1 && \
+    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]]
+}
+
+_test_full_access_disabled_by_requirements_cache() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/cloud-requirements-cache.json" <<'JSON'
+{"signed_payload":{"contents":"allowed_sandbox_modes = [\"read-only\", \"workspace-write\"]\n"}}
+JSON
+
+    local old_home="$HOME" result=1
+    HOME="$fake_home"
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+
+    if ! codex_yolo_full_access_allowed; then
+        result=0
+    fi
+
+    HOME="$old_home"
+    rm -rf "$fake_home"
+    return $result
+}
+
+_test_permission_config_arg() {
+    CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+    local output
+    output="$(codex_yolo_permission_config_arg)"
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    [[ "$output" == "-c 'permission_profile=\"codex-auto-review\"' " ]]
+}
+
+assert_ok "configure_codex_permissions: uses Full Access when allowed" _test_configure_permissions_full_access_allowed
+assert_ok "configure_codex_permissions: uses Auto-review when Full Access disabled" _test_configure_permissions_full_access_disabled
+assert_ok "configure_codex_permissions: accepts auto-review alias" _test_configure_permissions_auto_review_alias
+assert_ok "codex_yolo_full_access_allowed: honors requirements cache" _test_full_access_disabled_by_requirements_cache
+assert_ok "codex_yolo_permission_config_arg: emits Codex override" _test_permission_config_arg
 
 section "configure_codex_sandbox — Sandbox fallback"
 
@@ -1248,7 +1334,8 @@ _test_help_sandbox_options() {
     local output
     output="$(bash "$SCRIPT_DIR/codex-yolo" --help 2>&1)"
     [[ "$output" == *"--no-codex-sandbox"* ]] && \
-    [[ "$output" == *"--force-codex-sandbox"* ]]
+    [[ "$output" == *"--force-codex-sandbox"* ]] && \
+    [[ "$output" == *"--permissions"* ]]
 }
 assert_ok "launcher: --help shows Codex sandbox options" _test_help_sandbox_options
 

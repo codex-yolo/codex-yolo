@@ -128,6 +128,7 @@ Re-attach later with `codex-yolo -r` (or `codex-yolo --resume`).
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
 -r, --resume          Re-attach to an existing yolo session
+--permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
 --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
 --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
 -h, --help            Show help
@@ -150,6 +151,11 @@ sandboxing. The fake `bwrap` executes the command after bubblewrap's `--`
 separator directly, so it should only be used inside an externally isolated
 container. Use `--force-codex-sandbox` to require the real sandbox and surface
 failures instead.
+
+For Codex `/permissions`, `codex-yolo` defaults to Full Access when the active
+Codex requirements allow it. If Full Access is disabled by requirements, it uses
+Auto-review (`codex-auto-review`). Override this with `--permissions
+full-access`, `--permissions auto-review`, or `--permissions none`.
 
 ## How it works
 

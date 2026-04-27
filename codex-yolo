@@ -21,6 +21,7 @@ Options:
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
   -r, --resume          Re-attach to an existing yolo session
+  --permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
   --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
   --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
   -h, --help            Show this help
@@ -57,6 +58,7 @@ main() {
     local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
+    local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
     local tasks=()
 
     # Parse arguments
@@ -72,6 +74,7 @@ main() {
             --no-merge)        no_merge=1; shift ;;
             --no-cleanup)      no_cleanup=1; shift ;;
             --conflict-poll)   conflict_poll="$2"; shift 2 ;;
+            --permissions)          codex_permissions_policy="$2"; shift 2 ;;
             --no-codex-sandbox)    codex_sandbox_policy="off"; shift ;;
             --force-codex-sandbox) codex_sandbox_policy="force"; shift ;;
             -r|--resume)   resume=1; shift ;;
@@ -132,6 +135,7 @@ main() {
 
     # Ensure Codex CLI config directory exists
     ensure_codex_config
+    configure_codex_permissions "$codex_permissions_policy" || exit 1
     configure_codex_sandbox "$codex_sandbox_policy" || exit 1
 
     # ── worktree setup ───────────────────────────────────────────────────────
@@ -230,6 +234,7 @@ main() {
             local merge_opts=""
             (( no_cleanup )) && merge_opts="$merge_opts --no-cleanup"
             [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
+            [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] && merge_opts="$merge_opts --permissions '$CODEX_YOLO_PERMISSION_PROFILE'"
             (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && merge_opts="$merge_opts --no-codex-sandbox"
             if [[ -n "${CODEX_YOLO_FAKE_BWRAP_DIR:-}" ]]; then
                 local fake_bwrap_dir="${CODEX_YOLO_FAKE_BWRAP_DIR//\'/\'\\\'\'}"
@@ -260,16 +265,19 @@ build_agent_cmd() {
     local model="$1" task="$2"
     local cmd
     local prefix
+    local permission_arg
 
     prefix="$(codex_yolo_command_prefix)"
+    permission_arg="$(codex_yolo_permission_config_arg)"
 
     if (( CODEX_YOLO_FORCE_CODEX_SANDBOX )); then
-        cmd="${prefix}codex --full-auto"
+        cmd="${prefix}codex --full-auto $permission_arg"
     elif (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
-        cmd="${prefix}codex --dangerously-bypass-approvals-and-sandbox"
+        cmd="${prefix}codex --dangerously-bypass-approvals-and-sandbox $permission_arg"
     else
-        cmd="${prefix}codex --yolo"
+        cmd="${prefix}codex --yolo $permission_arg"
     fi
+    cmd="${cmd%" "}"
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
@@ -301,7 +309,8 @@ build_agent_cmd() {
 build_exec_agent_cmd() {
     local model="$1" task="$2"
     local cmd
-    cmd="$(codex_yolo_command_prefix)codex exec"
+    cmd="$(codex_yolo_command_prefix)codex exec $(codex_yolo_permission_config_arg)"
+    cmd="${cmd%" "}"
 
     if (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
         cmd="$cmd --dangerously-bypass-approvals-and-sandbox"
