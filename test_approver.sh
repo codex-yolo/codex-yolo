@@ -94,6 +94,9 @@ eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}
 eval "$(sed -n '/^build_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^build_exec_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 
+# Source control-pane helpers without running the interactive loop.
+source "$SCRIPT_DIR/lib/control-pane.sh" "" "" "standard"
+
 # ── helper to build realistic pane captures ──────────────────────────────────
 
 # Simulates Codex CLI command execution approval prompt.
@@ -853,6 +856,8 @@ assert_fail "Cooldown: pane %2 approved 10s ago, not in cooldown" \
 
 section "build_agent_cmd — Command construction"
 
+CODEX_YOLO_PERMISSION_PROFILE=""
+
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: no model" \
     "codex --yolo 'fix the bug'" "$_out"
@@ -946,6 +951,166 @@ CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 CODEX_YOLO_PERMISSION_PROFILE=""
+
+section "control-pane — Slash command parsing"
+
+_out="$(control_parse_interval "1h")"
+assert_eq "control_parse_interval: 1h" "3600" "$_out"
+
+_out="$(control_parse_interval "30m")"
+assert_eq "control_parse_interval: 30m" "1800" "$_out"
+
+_out="$(control_parse_interval "90s")"
+assert_eq "control_parse_interval: 90s" "90" "$_out"
+
+_out="$(control_parse_interval "1d")"
+assert_eq "control_parse_interval: 1d" "86400" "$_out"
+
+assert_fail "control_parse_interval: rejects missing amount" \
+    control_parse_interval "h"
+
+assert_fail "control_parse_interval: rejects unknown unit" \
+    control_parse_interval "1x"
+
+assert_fail "control_parse_interval: rejects zero interval" \
+    control_parse_interval "0m"
+
+_test_control_parse_loop_command() {
+    local parsed
+    parsed="$(control_parse_loop_command "/loop 1h Continue experiments and push best submission")" || return 1
+    [[ "$parsed" == $'1h\t3600\tContinue experiments and push best submission' ]]
+}
+assert_ok "control_parse_loop_command: parses interval and prompt" _test_control_parse_loop_command
+
+_test_control_parse_loop_preserves_prompt_spacing() {
+    local parsed
+    parsed="$(control_parse_loop_command "/loop 30m   Run tests, commit, and push if green")" || return 1
+    [[ "$parsed" == $'30m\t1800\tRun tests, commit, and push if green' ]]
+}
+assert_ok "control_parse_loop_command: trims separator spaces" _test_control_parse_loop_preserves_prompt_spacing
+
+assert_fail "control_parse_loop_command: rejects missing prompt" \
+    control_parse_loop_command "/loop 1h"
+
+assert_fail "control_parse_loop_command: rejects invalid interval" \
+    control_parse_loop_command "/loop 1x retry"
+
+###############################################################################
+#                       CONTROL PANE TMUX DISPATCH                            #
+###############################################################################
+
+section "control-pane — Tmux dispatch"
+
+_CONTROL_SESSION="control-pane-test-$$"
+_CONTROL_AUDIT="/tmp/codex-yolo-control-pane-test-$$.log"
+
+_control_cleanup() {
+    tmux kill-session -t "$_CONTROL_SESSION" 2>/dev/null || true
+    rm -f "$_CONTROL_AUDIT" 2>/dev/null || true
+}
+
+_control_start_read_agent() {
+    tmux new-session -d -s "$_CONTROL_SESSION" -n "agent-1" \
+        "bash -lc 'while IFS= read -r line; do printf \"READ:%s\\n\" \"\$line\"; done'"
+}
+
+_test_control_send_prompt_uses_enter_key() {
+    (
+        local calls audit log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_send_prompt "sess" "$audit" "agent-1" "hello world" 9 >/dev/null || exit 1
+        log="$(cat "$calls")"
+        rm -f "$calls" "$audit"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l hello world"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
+    )
+}
+assert_ok "control_send_prompt: submits with Enter key" _test_control_send_prompt_uses_enter_key
+
+_test_control_send_prompt_to_agent() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    sleep 0.2
+
+    local old_delay="$CONTROL_SUBMIT_DELAY"
+    CONTROL_SUBMIT_DELAY=0.05
+    control_send_prompt "$_CONTROL_SESSION" "$_CONTROL_AUDIT" "agent-1" "control dispatch test" 1 || return 1
+    CONTROL_SUBMIT_DELAY="$old_delay"
+    sleep 0.3
+
+    local capture
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    _control_cleanup
+    [[ "$capture" == *"READ:control dispatch test"* ]]
+}
+assert_ok "control_send_prompt: sends prompt to agent-1" _test_control_send_prompt_to_agent
+
+_test_control_loop_dispatches_immediately() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    sleep 0.2
+
+    SESSION_NAME="$_CONTROL_SESSION"
+    AUDIT_LOG="$_CONTROL_AUDIT"
+    SESSION_MODE="standard"
+    LOOP_PIDS=()
+    LOOP_INTERVALS=()
+    LOOP_SECONDS=()
+    LOOP_PROMPTS=()
+    LOOP_TARGETS=()
+    NEXT_LOOP_ID=1
+
+    local old_delay="$CONTROL_SUBMIT_DELAY"
+    CONTROL_SUBMIT_DELAY=0.05
+    control_start_loop "5s" "5" "immediate loop dispatch test" || return 1
+    sleep 0.4
+    control_cancel_loop 1 >/dev/null 2>&1 || true
+    CONTROL_SUBMIT_DELAY="$old_delay"
+
+    local capture
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    _control_cleanup
+    [[ "$capture" == *"READ:immediate loop dispatch test"* ]]
+}
+assert_ok "control-pane: /loop dispatches immediately" _test_control_loop_dispatches_immediately
+
+_test_control_loop_dispatches_prompt() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    sleep 0.2
+
+    {
+        printf '/loop 2s loop dispatch test\n'
+        sleep 0.5
+        printf '/loops cancel 1\n'
+    } | CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 timeout 4 bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" standard >/dev/null 2>&1 || true
+
+    local capture
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    _control_cleanup
+    [[ "$capture" == *"READ:loop dispatch test"* ]]
+}
+assert_ok "control-pane: /loop dispatches on interval" _test_control_loop_dispatches_prompt
+
+_control_cleanup
 
 section "configure_codex_permissions — Permission profile defaults"
 

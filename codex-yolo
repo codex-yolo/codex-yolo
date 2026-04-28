@@ -247,9 +247,15 @@ main() {
         fi
     fi
 
-    # Create control window tailing the audit log
+    # Create control window with audit log tailing and slash commands
     tmux new-window -t "$SESSION_NAME" -n "control" -c "$work_dir"
-    tmux send-keys -t "$SESSION_NAME:control" "tail -f $AUDIT_LOG" C-m
+    local control_mode="standard"
+    (( worktree_mode )) && control_mode="worktree"
+    local control_script="${SCRIPT_DIR//\'/\'\\\'\'}"
+    local control_session="${SESSION_NAME//\'/\'\\\'\'}"
+    local control_log="${AUDIT_LOG//\'/\'\\\'\'}"
+    tmux send-keys -t "$SESSION_NAME:control" \
+        "bash '$control_script/lib/control-pane.sh' '$control_session' '$control_log' '$control_mode'" C-m
 
     # Select the first agent window
     tmux select-window -t "$SESSION_NAME:agent-1"

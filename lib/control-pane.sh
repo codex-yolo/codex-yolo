@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# control-pane.sh - Interactive control window for codex-yolo sessions
+set -uo pipefail
+
+SESSION_NAME="${1:-}"
+AUDIT_LOG="${2:-}"
+SESSION_MODE="${3:-standard}"
+
+declare -A LOOP_PIDS=()
+declare -A LOOP_INTERVALS=()
+declare -A LOOP_SECONDS=()
+declare -A LOOP_PROMPTS=()
+declare -A LOOP_TARGETS=()
+NEXT_LOOP_ID=1
+TAIL_PID=""
+CONTROL_SUBMIT_DELAY="${CODEX_YOLO_CONTROL_SUBMIT_DELAY:-0.2}"
+
+control_audit() {
+    local msg="$1"
+    [[ -n "${AUDIT_LOG:-}" ]] || return 0
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] CONTROL $msg" >> "$AUDIT_LOG" 2>/dev/null || true
+}
+
+control_ltrim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    printf '%s' "$value"
+}
+
+control_preview() {
+    local value="$1"
+    if (( ${#value} > 80 )); then
+        printf '%s...' "${value:0:77}"
+    else
+        printf '%s' "$value"
+    fi
+}
+
+control_parse_interval() {
+    local interval="$1"
+    local amount unit multiplier
+
+    [[ "$interval" =~ ^([1-9][0-9]*)([smhd])$ ]] || return 1
+
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+
+    case "$unit" in
+        s) multiplier=1 ;;
+        m) multiplier=60 ;;
+        h) multiplier=3600 ;;
+        d) multiplier=86400 ;;
+        *) return 1 ;;
+    esac
+
+    printf '%s\n' "$(( amount * multiplier ))"
+}
+
+control_parse_loop_command() {
+    local line="$1"
+    local rest interval prompt seconds
+
+    [[ "$line" == "/loop" || "$line" == "/loop "* || "$line" == $'/loop\t'* ]] || return 1
+
+    rest="${line#/loop}"
+    rest="$(control_ltrim "$rest")"
+    [[ -n "$rest" ]] || return 1
+
+    interval="${rest%%[[:space:]]*}"
+    prompt="${rest#"$interval"}"
+    prompt="$(control_ltrim "$prompt")"
+    [[ -n "$prompt" ]] || return 1
+
+    seconds="$(control_parse_interval "$interval")" || return 1
+    printf '%s\t%s\t%s\n' "$interval" "$seconds" "$prompt"
+}
+
+control_agent_exists() {
+    local session="$1" target_window="$2"
+    tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$target_window"
+}
+
+control_send_prompt() {
+    local session="$1" audit_log="$2" target_window="$3" prompt="$4" loop_id="${5:-manual}"
+    local target="${session}:${target_window}"
+    local preview
+
+    if ! control_agent_exists "$session" "$target_window"; then
+        echo "agent target not found: $target_window"
+        AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id target missing: $target_window"
+        return 1
+    fi
+
+    if tmux send-keys -t "$target" -l "$prompt" 2>/dev/null; then
+        # Codex's TUI can classify a burst of text plus immediate Enter as paste
+        # input. A short pause makes the Enter arrive as a submit key.
+        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+        tmux send-keys -t "$target" Enter 2>/dev/null || {
+            echo "failed to submit prompt to $target_window"
+            AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id submit failed: $target_window"
+            return 1
+        }
+        preview="$(control_preview "$prompt")"
+        AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id sent to $target_window: $preview"
+        return 0
+    fi
+
+    echo "failed to send prompt to $target_window"
+    AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id send failed: $target_window"
+    return 1
+}
+
+control_loop_worker() {
+    local session="$1" audit_log="$2" loop_id="$3" seconds="$4" interval="$5" target_window="$6" prompt="$7"
+
+    AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id worker started: every $interval to $target_window"
+
+    while tmux has-session -t "$session" 2>/dev/null; do
+        control_send_prompt "$session" "$audit_log" "$target_window" "$prompt" "$loop_id" >/dev/null || true
+        sleep "$seconds" || break
+    done
+
+    AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id worker stopped"
+}
+
+control_start_loop() {
+    local interval="$1" seconds="$2" prompt="$3"
+    local target_window="agent-1"
+    local loop_id pid preview
+
+    if [[ "$SESSION_MODE" == "worktree" ]]; then
+        echo "/loop is disabled in worktree mode because agent windows run codex exec and may exit."
+        control_audit "LOOP rejected in worktree mode"
+        return 1
+    fi
+
+    if ! control_agent_exists "$SESSION_NAME" "$target_window"; then
+        echo "agent target not found: $target_window"
+        control_audit "LOOP rejected; target missing: $target_window"
+        return 1
+    fi
+
+    loop_id="$NEXT_LOOP_ID"
+    NEXT_LOOP_ID=$((NEXT_LOOP_ID + 1))
+
+    control_loop_worker "$SESSION_NAME" "$AUDIT_LOG" "$loop_id" "$seconds" "$interval" "$target_window" "$prompt" &
+    pid=$!
+
+    LOOP_PIDS["$loop_id"]="$pid"
+    LOOP_INTERVALS["$loop_id"]="$interval"
+    LOOP_SECONDS["$loop_id"]="$seconds"
+    LOOP_PROMPTS["$loop_id"]="$prompt"
+    LOOP_TARGETS["$loop_id"]="$target_window"
+
+    preview="$(control_preview "$prompt")"
+    echo "scheduled loop #$loop_id every $interval to $target_window: $preview"
+    control_audit "LOOP #$loop_id scheduled: every $interval to $target_window: $preview"
+}
+
+control_cancel_loop() {
+    local loop_id="$1"
+    local pid="${LOOP_PIDS[$loop_id]:-}"
+
+    if [[ -z "$pid" ]]; then
+        echo "no active loop with id: $loop_id"
+        return 1
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    unset "LOOP_PIDS[$loop_id]"
+    unset "LOOP_INTERVALS[$loop_id]"
+    unset "LOOP_SECONDS[$loop_id]"
+    unset "LOOP_PROMPTS[$loop_id]"
+    unset "LOOP_TARGETS[$loop_id]"
+
+    echo "canceled loop #$loop_id"
+    control_audit "LOOP #$loop_id canceled"
+}
+
+control_list_loops() {
+    local found=0
+    local id pid preview
+
+    for (( id=1; id<NEXT_LOOP_ID; id++ )); do
+        pid="${LOOP_PIDS[$id]:-}"
+        [[ -n "$pid" ]] || continue
+        if ! kill -0 "$pid" 2>/dev/null; then
+            unset "LOOP_PIDS[$id]"
+            unset "LOOP_INTERVALS[$id]"
+            unset "LOOP_SECONDS[$id]"
+            unset "LOOP_PROMPTS[$id]"
+            unset "LOOP_TARGETS[$id]"
+            continue
+        fi
+
+        found=1
+        preview="$(control_preview "${LOOP_PROMPTS[$id]}")"
+        printf '#%s every %s to %s: %s\n' "$id" "${LOOP_INTERVALS[$id]}" "${LOOP_TARGETS[$id]}" "$preview"
+    done
+
+    if (( ! found )); then
+        echo "no active loops"
+    fi
+}
+
+control_print_help() {
+    cat <<'EOF'
+Available commands:
+  /loop <interval> <prompt>     Schedule a prompt for agent-1. Intervals: 30s, 15m, 1h, 1d
+  /loops                        List active loops
+  /loops cancel <id>            Cancel a loop
+  /help                         Show this help
+EOF
+}
+
+control_handle_command() {
+    local line="$1"
+    local parsed interval seconds prompt rest loop_id
+
+    line="$(control_ltrim "$line")"
+    [[ -n "$line" ]] || return 0
+
+    case "$line" in
+        /help)
+            control_print_help
+            ;;
+        /loops)
+            control_list_loops
+            ;;
+        /loops\ cancel\ *)
+            rest="${line#/loops cancel }"
+            rest="$(control_ltrim "$rest")"
+            if [[ "$rest" =~ ^([0-9]+)[[:space:]]*$ ]]; then
+                loop_id="${BASH_REMATCH[1]}"
+                control_cancel_loop "$loop_id"
+            else
+                echo "usage: /loops cancel <id>"
+            fi
+            ;;
+        /loops*)
+            echo "usage: /loops or /loops cancel <id>"
+            ;;
+        /loop*)
+            if parsed="$(control_parse_loop_command "$line")"; then
+                interval="${parsed%%$'\t'*}"
+                rest="${parsed#*$'\t'}"
+                seconds="${rest%%$'\t'*}"
+                prompt="${rest#*$'\t'}"
+                control_start_loop "$interval" "$seconds" "$prompt"
+            else
+                echo "usage: /loop <interval> <prompt>"
+            fi
+            ;;
+        /*)
+            echo "unknown command: $line"
+            echo "type /help for available commands"
+            ;;
+        *)
+            echo "control accepts slash commands only; type /help"
+            ;;
+    esac
+}
+
+control_cleanup() {
+    local id pid
+
+    if [[ -n "${TAIL_PID:-}" ]]; then
+        kill "$TAIL_PID" 2>/dev/null || true
+        wait "$TAIL_PID" 2>/dev/null || true
+        TAIL_PID=""
+    fi
+
+    for id in "${!LOOP_PIDS[@]}"; do
+        pid="${LOOP_PIDS[$id]:-}"
+        [[ -n "$pid" ]] || continue
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+}
+
+control_main() {
+    local line
+
+    if [[ -z "$SESSION_NAME" || -z "$AUDIT_LOG" ]]; then
+        echo "usage: control-pane.sh <session> <audit-log> [standard|worktree]" >&2
+        exit 1
+    fi
+
+    : >> "$AUDIT_LOG" 2>/dev/null || true
+
+    trap control_cleanup EXIT
+    trap 'control_cleanup; exit 0' INT TERM
+    control_audit "control pane started (mode=$SESSION_MODE)"
+
+    tail -n 40 -f "$AUDIT_LOG" &
+    TAIL_PID=$!
+
+    echo ""
+    echo "codex-yolo control ready. Type /help for commands."
+
+    while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+        printf 'codex-yolo> '
+        if ! IFS= read -r line; then
+            break
+        fi
+        control_handle_command "$line"
+    done
+
+    control_audit "control pane stopped"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    control_main "$@"
+fi

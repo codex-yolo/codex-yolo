@@ -15,6 +15,7 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 - [Quick start](#quick-start)
 - [Worktree mode](#worktree-mode)
 - [Navigation](#navigation)
+- [Control commands](#control-commands)
 - [Options](#options)
 - [How it works](#how-it-works)
   - [Detection signals](#detection-signals)
@@ -76,7 +77,7 @@ codex-yolo -m o4-mini "refactor the API layer"
 codex-yolo -d /path/to/project "run the test suite and fix failures"
 ```
 
-Once launched, you're inside a tmux session with one window per agent. The last window (`control`) tails the audit log in real time.
+Once launched, you're inside a tmux session with one window per agent. The last window (`control`) tails the audit log in real time and accepts slash commands.
 
 ## Worktree mode
 
@@ -119,6 +120,26 @@ See [docs/worktree-mode-demo.md](docs/worktree-mode-demo.md) for a complete demo
 
 Re-attach later with `codex-yolo -r` (or `codex-yolo --resume`).
 
+## Control commands
+
+The `control` window accepts slash commands while continuing to show the audit log.
+
+```bash
+/loop 1h Continue experiments and push best submission
+```
+
+Available commands:
+
+| Command | Action |
+|---|---|
+| `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled |
+| `/loops` | List active loops |
+| `/loops cancel <id>` | Cancel one loop |
+| `/help` | Show command help |
+
+Intervals are whole numbers with `s`, `m`, `h`, or `d`, for example `30s`, `15m`, `1h`, or `1d`.
+`/loop` is disabled in worktree mode because agent windows run `codex exec` and may exit.
+
 ## Options
 
 ```
@@ -160,12 +181,13 @@ full-access`, `--permissions auto-review`, or `--permissions none`.
 ## How it works
 
 1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
-2. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
+2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop`.
+3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
    - Detects six prompt styles (see below)
    - Sends `Enter` via `tmux send-keys` to confirm the pre-selected first option (always the approval option)
    - Applies a 2-second per-pane cooldown to prevent double-approvals
-3. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval with timestamp, pane ID, and matched pattern. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
+4. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval and control event with timestamps. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
 
 ### Worktree pipeline
 
@@ -203,6 +225,7 @@ The approver requires the primary signal plus at least one secondary signal to f
 codex-yolo               # Main launcher script
 lib/
   common.sh              # Logging, prerequisite checks
+  control-pane.sh        # Interactive control window + slash command scheduler
   approver-daemon.sh     # tmux capture-pane monitor + auto-approver
   worktree-manager.sh    # Git worktree lifecycle
   conflict-daemon.sh     # Real-time conflict detection via git merge-tree
