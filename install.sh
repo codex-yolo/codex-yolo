@@ -14,7 +14,9 @@ done
 
 REPO="https://github.com/codex-yolo/codex-yolo.git"
 INSTALL_DIR="${CODEX_YOLO_HOME:-$HOME/.codex-yolo}"
-BIN_DIR="$HOME/.local/bin"
+DEFAULT_BIN_DIR="$HOME/.local/bin"
+REQUESTED_BIN_DIR="${CODEX_YOLO_BIN_DIR:-$DEFAULT_BIN_DIR}"
+BIN_DIR="$REQUESTED_BIN_DIR"
 NPM_PREFIX="${CODEX_YOLO_NPM_PREFIX:-$HOME/.local}"
 ORIGINAL_PATH="${PATH:-}"
 
@@ -66,6 +68,25 @@ run_as_root() {
     else
         "$@"
     fi
+}
+
+choose_bin_dir() {
+    local requested="$1"
+    local fallback="$INSTALL_DIR/bin"
+
+    if mkdir -p "$requested" 2>/dev/null && [[ -w "$requested" ]]; then
+        printf '%s\n' "$requested"
+        return 0
+    fi
+
+    if [[ -n "${CODEX_YOLO_BIN_DIR:-}" ]]; then
+        error "Cannot create or write CODEX_YOLO_BIN_DIR=$requested. Set CODEX_YOLO_BIN_DIR to a writable directory and re-run."
+    fi
+
+    warn "Cannot create or write $requested — falling back to $fallback" >&2
+    mkdir -p "$fallback" || error "Cannot create fallback bin directory: $fallback"
+    [[ -w "$fallback" ]] || error "Fallback bin directory is not writable: $fallback"
+    printf '%s\n' "$fallback"
 }
 
 # Install a package using the appropriate package manager
@@ -265,7 +286,7 @@ chmod +x "$INSTALL_DIR/codex-yolo"
 # -------------------------------------------------------------------
 # Symlink into PATH
 # -------------------------------------------------------------------
-mkdir -p "$BIN_DIR"
+BIN_DIR="$(choose_bin_dir "$REQUESTED_BIN_DIR")"
 
 ln -sf "$INSTALL_DIR/codex-yolo" "$BIN_DIR/codex-yolo"
 info "Linked codex-yolo → $BIN_DIR/codex-yolo"
@@ -298,12 +319,20 @@ case "$SHELL_NAME" in
 esac
 
 if ! echo "$ORIGINAL_PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
-    EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+    if [[ "$BIN_DIR" == "$DEFAULT_BIN_DIR" ]]; then
+        EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+    else
+        EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
+    fi
     if [[ "$SHELL_NAME" == "fish" ]]; then
-        EXPORT_LINE='fish_add_path $HOME/.local/bin'
+        if [[ "$BIN_DIR" == "$DEFAULT_BIN_DIR" ]]; then
+            EXPORT_LINE='fish_add_path $HOME/.local/bin'
+        else
+            EXPORT_LINE="fish_add_path $BIN_DIR"
+        fi
     fi
 
-    if [[ -f "$RC_FILE" ]] && grep -qF '.local/bin' "$RC_FILE" 2>/dev/null; then
+    if [[ -f "$RC_FILE" ]] && grep -qF "$BIN_DIR" "$RC_FILE" 2>/dev/null; then
         info "PATH entry already exists in $RC_FILE"
     else
         touch "$RC_FILE"
