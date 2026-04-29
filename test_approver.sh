@@ -1056,6 +1056,12 @@ assert_fail "permissions page: current does not need changing" \
 assert_fail "permissions page: refuses non-permissions pane" \
     control_permissions_needs_auto_review "normal chat output"
 
+assert_ok "permissions busy: detects disabled while task in progress" \
+    control_permissions_command_busy "_ '/permissions' is disabled while a task is in progress."
+
+assert_fail "permissions busy: ignores unrelated task progress text" \
+    control_permissions_command_busy "a task is in progress"
+
 assert_ok "permissions startup: detects Codex TUI readiness" \
     control_codex_tui_visible "OpenAI Codex"$'\n'"model: gpt-5.5 /model to change"
 
@@ -1186,6 +1192,50 @@ _test_control_permissions_refuses_wrong_page() {
 }
 assert_ok "permissions command: refuses when page is not visible" _test_control_permissions_refuses_wrong_page
 
+_test_control_permissions_busy_returns_retry() {
+    (
+        local calls audit log audit_log rc
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    if [[ -s "$calls" ]]; then
+                        printf "_ '/permissions' is disabled while a task is in progress.\n"
+                    else
+                        printf 'normal chat\n'
+                    fi
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        CONTROL_PERMISSIONS_OPEN_ATTEMPTS=1
+        control_set_auto_review "sess" "$audit" "agent-1" >/dev/null
+        rc=$?
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit"
+
+        [[ "$rc" == "2" ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$log" != *"Escape"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review busy: agent-1"* ]]
+    )
+}
+assert_ok "permissions command: reports busy as retryable" _test_control_permissions_busy_returns_retry
+
 _test_control_permissions_startup_waits_until_ready() {
     (
         local calls audit counter log audit_log captures
@@ -1236,6 +1286,72 @@ PANE
     )
 }
 assert_ok "permissions startup: waits until permissions page is visible" _test_control_permissions_startup_waits_until_ready
+
+_test_control_permissions_startup_retries_busy() {
+    (
+        local calls audit command_count log audit_log commands busy
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        commands="$(mktemp)"
+        busy="$(mktemp)"
+        printf '0' > "$commands"
+        printf '0' > "$busy"
+
+        tmux() {
+            local count seen
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    count="$(cat "$commands")"
+                    seen="$(cat "$busy")"
+                    if (( count == 0 )); then
+                        printf 'OpenAI Codex\nmodel: gpt-5.5 /model to change\n'
+                    elif (( count == 1 && seen == 0 )); then
+                        printf '1' > "$busy"
+                        printf "_ '/permissions' is disabled while a task is in progress.\n"
+                    elif (( count == 1 )); then
+                        printf "_ '/permissions' is disabled while a task is in progress.\n"
+                        printf 'OpenAI Codex\nmodel: gpt-5.5 /model to change\n'
+                    else
+                        cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+                    fi
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    if [[ "$*" == *"-l /permissions"* ]]; then
+                        count="$(cat "$commands")"
+                        printf '%s' "$((count + 1))" > "$commands"
+                    fi
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        CONTROL_PERMISSIONS_OPEN_ATTEMPTS=1
+        CONTROL_PERMISSIONS_BUSY_RETRY_DELAY=0
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        command_count="$(cat "$commands")"
+        rm -f "$calls" "$audit" "$commands" "$busy"
+
+        [[ "$command_count" == "2" ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup busy: agent-1 attempt=1"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
+    )
+}
+assert_ok "permissions startup: retries when Codex reports task in progress" _test_control_permissions_startup_retries_busy
 
 ###############################################################################
 #                       CONTROL PANE TMUX DISPATCH                            #

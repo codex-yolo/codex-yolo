@@ -15,6 +15,8 @@ NEXT_LOOP_ID=1
 TAIL_PID=""
 CONTROL_SUBMIT_DELAY="${CODEX_YOLO_CONTROL_SUBMIT_DELAY:-0.2}"
 CONTROL_PERMISSIONS_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_DELAY:-0.5}"
+CONTROL_PERMISSIONS_OPEN_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_OPEN_ATTEMPTS:-10}"
+CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETRY_DELAY:-2}"
 CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
 
@@ -88,6 +90,11 @@ control_permissions_page_visible() {
     [[ "$content" == *"Update Model Permissions"* ]]
 }
 
+control_permissions_command_busy() {
+    local content="$1"
+    [[ "$content" == *"/permissions"* && "$content" == *"disabled while a task is in progress"* ]]
+}
+
 control_permissions_auto_review_current() {
     local content="$1"
     control_permissions_page_visible "$content" || return 1
@@ -122,12 +129,17 @@ control_capture_target() {
 control_set_auto_review() {
     local session="$1" audit_log="$2" target_window="${3:-agent-1}"
     local target="${session}:${target_window}"
-    local content
+    local content open_attempt open_attempts
 
     if ! control_agent_exists "$session" "$target_window"; then
         echo "agent target not found: $target_window"
         AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review target missing: $target_window"
         return 1
+    fi
+
+    open_attempts="$CONTROL_PERMISSIONS_OPEN_ATTEMPTS"
+    if [[ ! "$open_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        open_attempts=1
     fi
 
     content="$(control_capture_target "$target" 2>/dev/null)" || content=""
@@ -145,15 +157,27 @@ control_set_auto_review() {
             return 1
         fi
 
-        sleep "$CONTROL_PERMISSIONS_DELAY" 2>/dev/null || true
-        content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+        for (( open_attempt=1; open_attempt<=open_attempts; open_attempt++ )); do
+            sleep "$CONTROL_PERMISSIONS_DELAY" 2>/dev/null || true
+            content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+
+            if control_permissions_page_visible "$content"; then
+                break
+            fi
+
+            if control_permissions_command_busy "$content"; then
+                echo "permissions command disabled while task is in progress on $target_window"
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review busy: $target_window"
+                return 2
+            fi
+        done
     fi
 
     if ! control_permissions_page_visible "$content"; then
         tmux send-keys -t "$target" Escape 2>/dev/null || true
         echo "permissions page not visible on $target_window"
         AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review page not visible: $target_window"
-        return 1
+        return 3
     fi
 
     if control_permissions_auto_review_current "$content"; then
@@ -188,7 +212,7 @@ control_wait_set_auto_review() {
     local attempts="${4:-$CONTROL_PERMISSIONS_STARTUP_ATTEMPTS}"
     local delay="${5:-$CONTROL_PERMISSIONS_STARTUP_DELAY}"
     local target="${session}:${target_window}"
-    local attempt content
+    local attempt content rc
 
     if ! control_agent_exists "$session" "$target_window"; then
         echo "agent target not found: $target_window"
@@ -204,7 +228,18 @@ control_wait_set_auto_review() {
         if control_permissions_page_visible "$content" || control_codex_tui_visible "$content"; then
             AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup ready: $target_window attempt=$attempt"
             control_set_auto_review "$session" "$audit_log" "$target_window"
-            return $?
+            rc=$?
+            if (( rc == 2 )); then
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup busy: $target_window attempt=$attempt"
+                sleep "$CONTROL_PERMISSIONS_BUSY_RETRY_DELAY" 2>/dev/null || true
+                continue
+            fi
+            if (( rc == 3 )); then
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup page not ready: $target_window attempt=$attempt"
+                sleep "$delay" 2>/dev/null || true
+                continue
+            fi
+            return "$rc"
         fi
 
         sleep "$delay" 2>/dev/null || true
