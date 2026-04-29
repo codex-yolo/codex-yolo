@@ -14,6 +14,9 @@ declare -A LOOP_TARGETS=()
 NEXT_LOOP_ID=1
 TAIL_PID=""
 CONTROL_SUBMIT_DELAY="${CODEX_YOLO_CONTROL_SUBMIT_DELAY:-0.2}"
+CONTROL_PERMISSIONS_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_DELAY:-0.5}"
+CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
+CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
 
 control_audit() {
     local msg="$1"
@@ -78,6 +81,138 @@ control_parse_loop_command() {
 control_agent_exists() {
     local session="$1" target_window="$2"
     tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$target_window"
+}
+
+control_permissions_page_visible() {
+    local content="$1"
+    [[ "$content" == *"Update Model Permissions"* ]]
+}
+
+control_permissions_auto_review_current() {
+    local content="$1"
+    control_permissions_page_visible "$content" || return 1
+    echo "$content" | grep -qiE 'Auto-review[[:space:]]*\(current\)'
+}
+
+control_permissions_auto_review_available() {
+    local content="$1"
+    control_permissions_page_visible "$content" || return 1
+    echo "$content" | grep -qi 'Auto-review'
+}
+
+control_permissions_needs_auto_review() {
+    local content="$1"
+    control_permissions_page_visible "$content" || return 1
+    control_permissions_auto_review_current "$content" && return 1
+    control_permissions_auto_review_available "$content"
+}
+
+control_codex_tui_visible() {
+    local content="$1"
+    [[ "$content" == *"OpenAI Codex"* ]] || \
+    [[ "$content" == *"Update Model Permissions"* ]] || \
+    [[ "$content" == *"model:"*" /model to change"* ]]
+}
+
+control_capture_target() {
+    local target="$1"
+    tmux capture-pane -p -t "$target" -S -100 2>/dev/null
+}
+
+control_set_auto_review() {
+    local session="$1" audit_log="$2" target_window="${3:-agent-1}"
+    local target="${session}:${target_window}"
+    local content
+
+    if ! control_agent_exists "$session" "$target_window"; then
+        echo "agent target not found: $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review target missing: $target_window"
+        return 1
+    fi
+
+    content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+    if ! control_permissions_page_visible "$content"; then
+        if ! tmux send-keys -t "$target" -l "/permissions" 2>/dev/null; then
+            echo "failed to open /permissions on $target_window"
+            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review open failed: $target_window"
+            return 1
+        fi
+
+        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+        if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
+            echo "failed to submit /permissions on $target_window"
+            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review submit failed: $target_window"
+            return 1
+        fi
+
+        sleep "$CONTROL_PERMISSIONS_DELAY" 2>/dev/null || true
+        content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+    fi
+
+    if ! control_permissions_page_visible "$content"; then
+        tmux send-keys -t "$target" Escape 2>/dev/null || true
+        echo "permissions page not visible on $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review page not visible: $target_window"
+        return 1
+    fi
+
+    if control_permissions_auto_review_current "$content"; then
+        tmux send-keys -t "$target" Escape 2>/dev/null || true
+        echo "Auto-review already current on $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review already current: $target_window"
+        return 0
+    fi
+
+    if ! control_permissions_needs_auto_review "$content"; then
+        tmux send-keys -t "$target" Escape 2>/dev/null || true
+        echo "Auto-review row not visible on $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review row missing: $target_window"
+        return 1
+    fi
+
+    if ! tmux send-keys -t "$target" Home Down Enter 2>/dev/null; then
+        echo "failed to select Auto-review on $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review select failed: $target_window"
+        return 1
+    fi
+
+    sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+    tmux send-keys -t "$target" Escape 2>/dev/null || true
+
+    echo "selected Auto-review on $target_window"
+    AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review selected: $target_window"
+}
+
+control_wait_set_auto_review() {
+    local session="$1" audit_log="$2" target_window="${3:-agent-1}"
+    local attempts="${4:-$CONTROL_PERMISSIONS_STARTUP_ATTEMPTS}"
+    local delay="${5:-$CONTROL_PERMISSIONS_STARTUP_DELAY}"
+    local target="${session}:${target_window}"
+    local attempt content
+
+    if ! control_agent_exists "$session" "$target_window"; then
+        echo "agent target not found: $target_window"
+        AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup target missing: $target_window"
+        return 1
+    fi
+
+    AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup waiting: $target_window"
+
+    for (( attempt=1; attempt<=attempts; attempt++ )); do
+        content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+
+        if control_permissions_page_visible "$content" || control_codex_tui_visible "$content"; then
+            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup ready: $target_window attempt=$attempt"
+            control_set_auto_review "$session" "$audit_log" "$target_window"
+            return $?
+        fi
+
+        sleep "$delay" 2>/dev/null || true
+    done
+
+    echo "Codex TUI not visible on $target_window"
+    AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup timed out: $target_window"
+    return 1
 }
 
 control_send_prompt() {
@@ -208,6 +343,7 @@ control_list_loops() {
 control_print_help() {
     cat <<'EOF'
 Available commands:
+  /permissions auto-review     Make Auto-review current for agent-1
   /loop <interval> <prompt>     Schedule a prompt for agent-1. Intervals: 30s, 15m, 1h, 1d
   /loops                        List active loops
   /loops cancel <id>            Cancel a loop
@@ -241,6 +377,12 @@ control_handle_command() {
             ;;
         /loops*)
             echo "usage: /loops or /loops cancel <id>"
+            ;;
+        /permissions\ auto-review)
+            control_set_auto_review "$SESSION_NAME" "$AUDIT_LOG" "agent-1"
+            ;;
+        /permissions*)
+            echo "usage: /permissions auto-review"
             ;;
         /loop*)
             if parsed="$(control_parse_loop_command "$line")"; then
@@ -312,5 +454,9 @@ control_main() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    if [[ "$SESSION_MODE" == "auto-review-once" ]]; then
+        control_wait_set_auto_review "$SESSION_NAME" "$AUDIT_LOG" "agent-1"
+        exit $?
+    fi
     control_main "$@"
 fi

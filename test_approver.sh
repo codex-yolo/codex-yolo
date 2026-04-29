@@ -91,6 +91,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
+eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^build_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^build_exec_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 
@@ -952,6 +953,34 @@ CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 CODEX_YOLO_PERMISSION_PROFILE=""
 
+section "codex-yolo — Startup Auto-review reconciliation"
+
+_test_should_reconcile_auto_review_interactive() {
+    CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+    codex_yolo_should_reconcile_auto_review 0 1 ""
+}
+assert_ok "startup reconciliation: enabled for standard interactive Auto-review" _test_should_reconcile_auto_review_interactive
+
+_test_should_not_reconcile_for_task() {
+    CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+    ! codex_yolo_should_reconcile_auto_review 0 1 "fix the bug"
+}
+assert_ok "startup reconciliation: skips prompted task sessions" _test_should_not_reconcile_for_task
+
+_test_should_not_reconcile_for_worktree() {
+    CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+    ! codex_yolo_should_reconcile_auto_review 1 1 ""
+}
+assert_ok "startup reconciliation: skips worktree mode" _test_should_not_reconcile_for_worktree
+
+_test_should_not_reconcile_for_full_access() {
+    CODEX_YOLO_PERMISSION_PROFILE="full-access"
+    ! codex_yolo_should_reconcile_auto_review 0 1 ""
+}
+assert_ok "startup reconciliation: skips non-Auto-review profile" _test_should_not_reconcile_for_full_access
+
+CODEX_YOLO_PERMISSION_PROFILE=""
+
 section "control-pane — Slash command parsing"
 
 _out="$(control_parse_interval "1h")"
@@ -994,6 +1023,219 @@ assert_fail "control_parse_loop_command: rejects missing prompt" \
 
 assert_fail "control_parse_loop_command: rejects invalid interval" \
     control_parse_loop_command "/loop 1x retry"
+
+section "control-pane — Permissions Auto-review"
+
+_permissions_page_current="$(cat <<'PANE'
+Update Model Permissions
+
+  Default
+  Auto-review (current)
+  Full Access (disabled)
+PANE
+)"
+
+_permissions_page_default="$(cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+)"
+
+assert_ok "permissions page: detects Auto-review current" \
+    control_permissions_auto_review_current "$_permissions_page_current"
+
+assert_ok "permissions page: detects Auto-review needs changing" \
+    control_permissions_needs_auto_review "$_permissions_page_default"
+
+assert_fail "permissions page: current does not need changing" \
+    control_permissions_needs_auto_review "$_permissions_page_current"
+
+assert_fail "permissions page: refuses non-permissions pane" \
+    control_permissions_needs_auto_review "normal chat output"
+
+assert_ok "permissions startup: detects Codex TUI readiness" \
+    control_codex_tui_visible "OpenAI Codex"$'\n'"model: gpt-5.5 /model to change"
+
+_test_control_permissions_select_sequence() {
+    (
+        local calls audit log audit_log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    if [[ -s "$calls" ]]; then
+                        cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+                    else
+                        printf 'normal chat\n'
+                    fi
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        control_set_auto_review "sess" "$audit" "agent-1" >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Escape"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
+    )
+}
+assert_ok "permissions command: selects Auto-review row" _test_control_permissions_select_sequence
+
+_test_control_permissions_already_current_escapes() {
+    (
+        local calls audit log audit_log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    cat <<'PANE'
+Update Model Permissions
+
+  Default
+  Auto-review (current)
+  Full Access (disabled)
+PANE
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        control_set_auto_review "sess" "$audit" "agent-1" >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit"
+
+        [[ "$log" != *"-l /permissions"* ]] && \
+        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Escape"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review already current: agent-1"* ]]
+    )
+}
+assert_ok "permissions command: exits when Auto-review already current" _test_control_permissions_already_current_escapes
+
+_test_control_permissions_refuses_wrong_page() {
+    (
+        local calls audit log audit_log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    printf 'normal chat\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        if control_set_auto_review "sess" "$audit" "agent-1" >/dev/null; then
+            exit 1
+        fi
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review page not visible: agent-1"* ]]
+    )
+}
+assert_ok "permissions command: refuses when page is not visible" _test_control_permissions_refuses_wrong_page
+
+_test_control_permissions_startup_waits_until_ready() {
+    (
+        local calls audit counter log audit_log captures
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        counter="$(mktemp)"
+        printf '0' > "$counter"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    captures="$(cat "$counter")"
+                    captures=$((captures + 1))
+                    printf '%s' "$captures" > "$counter"
+                    if (( captures < 2 )); then
+                        printf 'starting codex\n'
+                    else
+                        cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+                    fi
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit" "$counter"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup waiting: agent-1"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup ready: agent-1 attempt=2"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
+    )
+}
+assert_ok "permissions startup: waits until permissions page is visible" _test_control_permissions_startup_waits_until_ready
 
 ###############################################################################
 #                       CONTROL PANE TMUX DISPATCH                            #
@@ -1169,6 +1411,51 @@ JSON
     return $result
 }
 
+_test_full_access_disabled_by_approval_requirements_cache() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/cloud-requirements-cache.json" <<'JSON'
+{"signed_payload":{"contents":"allowed_sandbox_modes = [\"danger-full-access\"]\nallowed_approval_policies = [\"on-request\", \"on-failure\"]\n"}}
+JSON
+
+    local old_home="$HOME" result=1
+    HOME="$fake_home"
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+
+    if ! codex_yolo_full_access_allowed; then
+        result=0
+    fi
+
+    HOME="$old_home"
+    rm -rf "$fake_home"
+    return $result
+}
+
+_test_configure_permissions_approval_never_disabled() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/cloud-requirements-cache.json" <<'JSON'
+{"signed_payload":{"contents":"allowed_sandbox_modes = [\"danger-full-access\"]\napproval_policy = \"on-request\"\n"}}
+JSON
+
+    local old_home="$HOME" result=1
+    HOME="$fake_home"
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+    CODEX_YOLO_PERMISSION_PROFILE=""
+
+    configure_codex_permissions auto >/dev/null 2>&1 || result=2
+    if [[ "$result" != "2" && "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]]; then
+        result=0
+    fi
+
+    HOME="$old_home"
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    rm -rf "$fake_home"
+    return $result
+}
+
 _test_permission_config_arg() {
     CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
     local output
@@ -1181,6 +1468,8 @@ assert_ok "configure_codex_permissions: uses Full Access when allowed" _test_con
 assert_ok "configure_codex_permissions: uses Auto-review when Full Access disabled" _test_configure_permissions_full_access_disabled
 assert_ok "configure_codex_permissions: accepts auto-review alias" _test_configure_permissions_auto_review_alias
 assert_ok "codex_yolo_full_access_allowed: honors requirements cache" _test_full_access_disabled_by_requirements_cache
+assert_ok "codex_yolo_full_access_allowed: honors approval policy requirements cache" _test_full_access_disabled_by_approval_requirements_cache
+assert_ok "configure_codex_permissions: uses Auto-review when approval never is disabled" _test_configure_permissions_approval_never_disabled
 assert_ok "codex_yolo_permission_config_arg: emits Codex override" _test_permission_config_arg
 
 section "configure_codex_sandbox — Sandbox fallback"

@@ -169,10 +169,48 @@ def modes(block):
         return None
     return re.findall(r'"([^"]+)"', match.group(1))
 
+def list_values(block, key):
+    match = re.search(rf"{key}\s*=\s*\[(.*?)\]", block, re.S)
+    if not match:
+        return None
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+def scalar_value(block, key):
+    match = re.search(rf"{key}\s*=\s*\"([^\"]+)\"", block)
+    if not match:
+        return None
+    return match.group(1)
+
+def approval_never_allowed(block):
+    for key in (
+        "allowed_approval_policies",
+        "allowed_approval_policy",
+        "allowed_approval_modes",
+        "allowed_approval_mode",
+    ):
+        values = list_values(block, key)
+        if values is not None:
+            return "never" in values
+
+    value = scalar_value(block, "approval_policy")
+    if value is not None:
+        return value == "never"
+
+    return None
+
+def full_access_decision(block):
+    block_modes = modes(block)
+    sandbox_ok = None if block_modes is None else "danger-full-access" in block_modes
+    approval_ok = approval_never_allowed(block)
+
+    if sandbox_ok is False or approval_ok is False:
+        return False
+    if sandbox_ok is None and approval_ok is None:
+        return None
+    return True
+
 parts = contents.split("[[remote_sandbox_config]]")
-top_modes = modes(parts[0])
-if top_modes is not None and "danger-full-access" in top_modes:
-    sys.exit(0)
+top_decision = full_access_decision(parts[0])
 
 for block in parts[1:]:
     match = re.search(r"hostname_patterns\s*=\s*\[(.*?)\]", block, re.S)
@@ -180,14 +218,14 @@ for block in parts[1:]:
         continue
     patterns = re.findall(r'"([^"]+)"', match.group(1))
     if any(fnmatch.fnmatch(host, pattern) for pattern in patterns):
-        block_modes = modes(block)
-        if block_modes is None:
+        block_decision = full_access_decision(block)
+        if block_decision is None:
             continue
-        sys.exit(0 if "danger-full-access" in block_modes else 1)
+        sys.exit(0 if block_decision else 1)
 
-if top_modes is None:
+if top_decision is None:
     sys.exit(2)
-sys.exit(1)
+sys.exit(0 if top_decision else 1)
 PY
         then
             return 0

@@ -132,6 +132,7 @@ Available commands:
 
 | Command | Action |
 |---|---|
+| `/permissions auto-review` | Open Codex `/permissions`, make Auto-review current for `agent-1`, then return to chat |
 | `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled |
 | `/loops` | List active loops |
 | `/loops cancel <id>` | Cancel one loop |
@@ -176,12 +177,14 @@ failures instead.
 For Codex `/permissions`, `codex-yolo` defaults to Full Access when the active
 Codex requirements allow it. If Full Access is disabled by requirements, it uses
 Auto-review (`codex-auto-review`). Override this with `--permissions
-full-access`, `--permissions auto-review`, or `--permissions none`.
+full-access`, `--permissions auto-review`, or `--permissions none`. For
+standard interactive Auto-review sessions, `codex-yolo` also reconciles the TUI
+once at startup so `/permissions` shows `Auto-review (current)`.
 
 ## How it works
 
 1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
-2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop`.
+2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop` and `/permissions auto-review`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
    - Detects six prompt styles (see below)

@@ -54,6 +54,27 @@ tmux_attach() {
     fi
 }
 
+codex_yolo_should_reconcile_auto_review() {
+    local worktree_mode="$1" task_count="$2" first_task="$3"
+
+    [[ "$worktree_mode" == "0" ]] || return 1
+    [[ "$task_count" == "1" ]] || return 1
+    [[ -z "$first_task" ]] || return 1
+    [[ "${CODEX_YOLO_PERMISSION_PROFILE:-}" == "codex-auto-review" ]]
+}
+
+codex_yolo_start_auto_review_reconciliation() {
+    local script_dir="$1" session="$2" audit_log="$3"
+    local startup_delay="${CODEX_YOLO_AUTO_REVIEW_STARTUP_DELAY:-1}"
+
+    log_info "Reconciling Codex Auto-review permissions in TUI"
+    (
+        sleep "$startup_delay" 2>/dev/null || true
+        bash "$script_dir/lib/control-pane.sh" "$session" "$audit_log" auto-review-once
+    ) >/dev/null 2>&1 &
+    disown
+}
+
 main() {
     local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
@@ -189,6 +210,10 @@ main() {
     tmux send-keys -t "$SESSION_NAME:agent-1" "$cmd" C-m
 
     log_info "Started agent-1: ${first_task:+${first_task:0:60}...}${first_task:-interactive}"
+
+    if codex_yolo_should_reconcile_auto_review "$worktree_mode" "${#tasks[@]}" "$first_task"; then
+        codex_yolo_start_auto_review_reconciliation "$SCRIPT_DIR" "$SESSION_NAME" "$AUDIT_LOG"
+    fi
 
     # Create additional agent windows
     local i
