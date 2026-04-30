@@ -13,7 +13,7 @@ SESSION_NAME="${1:?Usage: approver-daemon.sh <session-name> [poll-interval] [aud
 POLL_INTERVAL="${2:-0.3}"
 AUDIT_LOG="${3:-$(log_dir)/codex-yolo-${SESSION_NAME}.log}"
 COOLDOWN_SECS=2
-PLAN_APPROVAL_TTL="${CODEX_YOLO_PLAN_APPROVAL_TTL:-120}"
+PLAN_APPROVAL_TTL="${CODEX_YOLO_PLAN_APPROVAL_TTL:-3600}"
 
 # Associative array tracking last-approval timestamp per pane
 declare -A LAST_APPROVED
@@ -189,7 +189,7 @@ plan_approval_marker_valid() {
     fi
 
     ttl="$PLAN_APPROVAL_TTL"
-    [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=120
+    [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=3600
     now="$(date +%s)"
     if (( now - marker_ts > ttl )); then
         rm -f "$marker" 2>/dev/null || true
