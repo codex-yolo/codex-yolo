@@ -271,8 +271,25 @@ if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
     fi
 elif [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing installation in $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch origin 2>/dev/null
-    git -C "$INSTALL_DIR" reset --hard origin/main 2>/dev/null || error "Failed to update. Resolve manually in $INSTALL_DIR"
+    UPDATE_OK=1
+    UPDATE_OUTPUT=""
+    if ! UPDATE_OUTPUT="$(git -C "$INSTALL_DIR" fetch origin 2>&1)"; then
+        UPDATE_OK=0
+        warn "Could not fetch the latest codex-yolo update:"
+        printf '%s\n' "$UPDATE_OUTPUT" >&2
+    elif ! UPDATE_OUTPUT="$(git -C "$INSTALL_DIR" reset --hard origin/main 2>&1)"; then
+        UPDATE_OK=0
+        warn "Could not reset the existing codex-yolo checkout to origin/main:"
+        printf '%s\n' "$UPDATE_OUTPUT" >&2
+    fi
+
+    if [[ "$UPDATE_OK" -ne 1 ]]; then
+        if [[ -f "$INSTALL_DIR/codex-yolo" ]]; then
+            warn "Using existing installation in $INSTALL_DIR"
+        else
+            error "Existing installation is incomplete and could not be updated. Remove $INSTALL_DIR and re-run."
+        fi
+    fi
 else
     if [[ -d "$INSTALL_DIR" ]]; then
         error "$INSTALL_DIR already exists but is not a git repo. Remove it first and re-run."
