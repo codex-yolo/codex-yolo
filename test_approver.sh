@@ -227,16 +227,16 @@ EOF
 make_plan_choice_prompt() {
     cat <<'EOF'
   Question 1/1 (1 unanswered)
-  What do you want me to do with the ARC-AGI-3 competition link?
+  What do you want me to do with the project reference link?
 
-  _ 1. Solution plan (Recommended)  Produce a concrete engineering/research plan for building a Kaggle submission.
+  _ 1. Solution plan (Recommended)  Produce a concrete engineering/research plan for building a submission.
 EOF
 }
 
 make_plan_submission_choice_prompt() {
     cat <<'EOF'
   Question 1/1 (1 unanswered)
-  Should the execution plan include submitting a new candidate to Kaggle, or only preparing and documenting it?
+  Should the execution plan include submitting a new candidate, or only preparing and documenting it?
 
   _ 1. Prepare only (Recommended)  Research, update notes/todo, build any promising candidate locally, but do not spend a submission slot.
     2. Auto-submit if better       Submit only if the refreshed evidence and offline checks clearly beat the current v36/v38 path.
@@ -1192,8 +1192,8 @@ _test_control_plan_collects_unterminated_final_line() {
         local collected
         CODEX_YOLO_CONTROL_PLAN_PASTE=1
         CONTROL_PLAN_PASTE_GRACE=0.01
-        collected="$(printf 'second line\nImprove your best submission, Submit the best local submission to this kaggle competition' | control_collect_plan_prompt "first line")"
-        [[ "$collected" == $'first line\nsecond line\nImprove your best submission, Submit the best local submission to this kaggle competition' ]]
+        collected="$(printf 'second line\nImprove your best submission, submit the best local submission for this task' | control_collect_plan_prompt "first line")"
+        [[ "$collected" == $'first line\nsecond line\nImprove your best submission, submit the best local submission for this task' ]]
     )
 }
 assert_ok "control_collect_plan_prompt: preserves pasted final line without trailing newline" _test_control_plan_collects_unterminated_final_line
@@ -1709,14 +1709,14 @@ _test_control_plan_command_collects_unterminated_paste() {
         CONTROL_PLAN_PASTE_GRACE=0.01
         CONTROL_SUBMIT_DELAY=0
 
-        url="https://www.kaggle.com/competitions/arc-prize-2026-arc-agi-3"
-        continuation=$'### Use PLAYWRIGHT\n### Look at kagglevault-main.zip contents\nImprove your best submission, Submit the best local submission to this kaggle competition'
+        url="https://example.com/projects/arc-task"
+        continuation=$'### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
         control_handle_command "/plan $url" < <(printf '%s' "$continuation") >/dev/null || exit 1
 
         log="$(cat "$calls")"
         rm -f "$calls" "$audit" "$marker"
 
-        expected=$'send-keys -t sess:agent-1 -l /plan '"$url"$'\n### Use PLAYWRIGHT\n### Look at kagglevault-main.zip contents\nImprove your best submission, Submit the best local submission to this kaggle competition'
+        expected=$'send-keys -t sess:agent-1 -l /plan '"$url"$'\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
         [[ "$log" == *"$expected"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
     )
