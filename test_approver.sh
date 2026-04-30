@@ -1723,6 +1723,37 @@ _test_control_plan_command_collects_unterminated_paste() {
 }
 assert_ok "control-pane: /plan command preserves pasted final line without trailing newline" _test_control_plan_command_collects_unterminated_paste
 
+_test_control_plan_interactive_paste_without_final_newline() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    sleep 0.2
+
+    tmux new-window -t "$_CONTROL_SESSION" -n "control" \
+        "CODEX_YOLO_CONTROL_PLAN_PASTE=1 CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE=0.2 CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard" || {
+            _control_cleanup
+            return 1
+        }
+    sleep 0.5
+
+    local input capture
+    input=$'/plan https://example.com/projects/arc-task\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "$input" || {
+        _control_cleanup
+        return 1
+    }
+    sleep 1.0
+
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    _control_cleanup
+
+    [[ "$capture" == *"READ:/plan https://example.com/projects/arc-task"* ]] && \
+    [[ "$capture" == *"READ:### Inspect the web reference"* ]] && \
+    [[ "$capture" == *"READ:### Review the local archive contents"* ]] && \
+    [[ "$capture" == *"READ:Improve your best submission, submit the best local submission for this task"* ]]
+}
+assert_ok "control-pane: interactive /plan paste preserves final line without trailing newline" _test_control_plan_interactive_paste_without_final_newline
+
 _test_control_plan_without_prompt() {
     (
         local calls audit marker log

@@ -92,7 +92,7 @@ control_plan_paste_enabled() {
 
 control_collect_plan_prompt() {
     local prompt="$1"
-    local delay ch chunk=""
+    local delay ch chunk="" tty_state="" restore_tty=0
 
     control_plan_paste_enabled || {
         printf '%s' "$prompt"
@@ -104,9 +104,19 @@ control_collect_plan_prompt() {
         delay=0.2
     fi
 
+    if [[ -t 0 ]]; then
+        tty_state="$(stty -g 2>/dev/null)" && \
+            stty -icanon min 0 time 0 2>/dev/null && \
+            restore_tty=1
+    fi
+
     while IFS= read -r -s -N 1 -t "$delay" ch; do
         chunk+="$ch"
     done
+
+    if (( restore_tty )); then
+        stty "$tty_state" 2>/dev/null || true
+    fi
 
     if [[ -n "$chunk" ]]; then
         # The submit newline for a pasted command is a delimiter, not prompt text.
