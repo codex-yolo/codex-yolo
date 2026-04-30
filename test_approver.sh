@@ -214,6 +214,16 @@ make_plan_prompt() {
 EOF
 }
 
+make_plan_implement_prompt() {
+    cat <<'EOF'
+  Implement this plan?
+
+  _ 1. Yes, implement this plan          Switch to Default and start coding.
+    2. Yes, clear context and implement  Fresh thread. Context: 30% used.
+    3. No, stay in Plan mode             Continue planning with the model.
+EOF
+}
+
 make_plan_choice_prompt() {
     cat <<'EOF'
   Question 1/1 (1 unanswered)
@@ -613,6 +623,9 @@ section "detect_plan_prompt — scoped plan approval"
 assert_ok "Plan approval: detects proceed-with-plan prompt" \
     detect_plan_prompt "$(make_plan_prompt)"
 
+assert_ok "Plan approval: detects numbered implement-this-plan prompt" \
+    detect_plan_prompt "$(make_plan_implement_prompt)"
+
 assert_ok "Plan approval: detects numbered Solution plan question" \
     detect_plan_choice_prompt "$(make_plan_choice_prompt)"
 
@@ -627,6 +640,9 @@ PANE
 
 assert_fail "Plan approval: generic detector does not approve plan prompt" \
     detect_prompt "$(make_plan_prompt)"
+
+assert_fail "Plan approval: generic detector does not approve numbered implement-this-plan prompt" \
+    detect_prompt "$(make_plan_implement_prompt)"
 
 assert_fail "Plan approval: generic detector does not approve numbered Solution plan question" \
     detect_prompt "$(make_plan_choice_prompt)"
@@ -2646,6 +2662,33 @@ _run_integ_plan_with_control_marker() {
 }
 assert_ok "Integration: plan prompt approved only with control marker" _run_integ_plan_with_control_marker
 
+_run_integ_plan_implement_with_control_marker() {
+    _integ_cleanup
+    local audit_tmp marker pane result
+    audit_tmp="$(mktemp)"
+    marker="${audit_tmp}.plan-approval"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+    pane="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    printf '%s\t%s\n' "$pane" "$(date +%s)" > "$marker"
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_implement_prompt)" ""
+    sleep 0.2
+
+    timeout 2 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    local marker_removed=0
+    [[ ! -f "$marker" ]] && marker_removed=1
+    rm -f "$audit_tmp" "$marker"
+    _integ_cleanup
+
+    [[ "$result" == *'pattern="plan-control"'* ]] && (( marker_removed ))
+}
+assert_ok "Integration: numbered implement-this-plan prompt approved only with control marker" _run_integ_plan_implement_with_control_marker
+
 _run_integ_plan_choice_with_control_marker() {
     _integ_cleanup
     local audit_tmp marker pane result marker_kept
@@ -2694,6 +2737,28 @@ _run_integ_plan_without_control_marker() {
     [[ "$result" != *"APPROVED"* ]]
 }
 assert_ok "Integration: direct agent /plan prompt is not auto-approved" _run_integ_plan_without_control_marker
+
+_run_integ_plan_implement_without_control_marker() {
+    _integ_cleanup
+    local audit_tmp result
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_implement_prompt)" ""
+    sleep 0.2
+
+    timeout 1.5 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "${audit_tmp}.plan-approval"
+    _integ_cleanup
+
+    [[ "$result" != *"APPROVED"* ]]
+}
+assert_ok "Integration: direct numbered implement-this-plan prompt is not auto-approved" _run_integ_plan_implement_without_control_marker
 
 _run_integ_plan_choice_without_control_marker() {
     _integ_cleanup

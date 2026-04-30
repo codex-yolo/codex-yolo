@@ -115,11 +115,11 @@ detect_plan_prompt() {
         has_plan=1
     fi
 
-    if echo "$tail_content" | grep -qiE '^[[:space:]]*(❯[[:space:]]*)?(Yes, proceed|Proceed|Implement|Approve|Continue)([[:space:]]|$)'; then
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*([_❯][[:space:]]*)?([0-9]+[.)][[:space:]]*)?(Yes, (proceed|implement this plan|clear context and implement)|Proceed|Implement|Approve|Continue)([[:space:]]|$)'; then
         has_approval_option=1
     fi
 
-    if echo "$tail_content" | grep -qiE '^[[:space:]]*(No, and tell Codex|Go back|Cancel|Keep planning|Revise|.*do differently)'; then
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*([_❯][[:space:]]*)?([0-9]+[.)][[:space:]]*)?(No, (and tell Codex|stay in Plan mode)|Go back|Cancel|Keep planning|Revise|.*do differently)'; then
         has_context=1
     fi
 
