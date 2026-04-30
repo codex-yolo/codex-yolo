@@ -1598,6 +1598,11 @@ _control_start_read_agent() {
         "bash -lc 'printf \"READY\\n\"; while IFS= read -r line; do printf \"READ:%s\\n\" \"\$line\"; done'"
 }
 
+_control_capture_joined() {
+    local target="$1" start="${2:--100}"
+    tmux capture-pane -pJ -t "$target" -S "$start" 2>/dev/null
+}
+
 _control_debug_dump() {
     local label="$1"
 
@@ -1612,6 +1617,8 @@ _control_debug_dump() {
     tmux capture-pane -pt "$_CONTROL_SESSION:control" -S -120 2>&1 || true
     echo "DEBUG: agent pane capture:"
     tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -120 2>&1 || true
+    echo "DEBUG: agent pane joined capture:"
+    _control_capture_joined "$_CONTROL_SESSION:agent-1" -120 2>&1 || true
     echo "DEBUG: audit log:"
     if [[ -f "$_CONTROL_AUDIT" ]]; then
         sed 's/^/AUDIT: /' "$_CONTROL_AUDIT"
@@ -1625,7 +1632,7 @@ _control_wait_for_capture() {
     local capture attempt
 
     for (( attempt=1; attempt<=attempts; attempt++ )); do
-        capture="$(tmux capture-pane -pt "$target" -S -100 2>/dev/null || true)"
+        capture="$(_control_capture_joined "$target" -100 || true)"
         [[ "$capture" == *"$needle"* ]] && return 0
         sleep "$delay"
     done
@@ -1685,7 +1692,7 @@ _test_control_send_prompt_to_agent() {
     }
 
     local capture
-    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:agent-1" -100 || true)"
     _control_cleanup
     [[ "$capture" == *"READ:control dispatch test"* ]]
 }
