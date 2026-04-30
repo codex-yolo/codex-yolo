@@ -19,7 +19,7 @@ CONTROL_PERMISSIONS_OPEN_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_OPEN_ATTEMPT
 CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETRY_DELAY:-2}"
 CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
-CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.05}"
+CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.2}"
 
 control_audit() {
     local msg="$1"
@@ -92,7 +92,7 @@ control_plan_paste_enabled() {
 
 control_collect_plan_prompt() {
     local prompt="$1"
-    local line delay captured=0
+    local delay ch chunk=""
 
     control_plan_paste_enabled || {
         printf '%s' "$prompt"
@@ -101,17 +101,22 @@ control_collect_plan_prompt() {
 
     delay="$CONTROL_PLAN_PASTE_GRACE"
     if [[ ! "$delay" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
-        delay=0.05
+        delay=0.2
     fi
 
-    while IFS= read -r -t "$delay" line; do
-        if [[ -n "$prompt" || "$captured" == "1" ]]; then
-            prompt+=$'\n'"$line"
-        else
-            prompt="$line"
-        fi
-        captured=1
+    while IFS= read -r -s -N 1 -t "$delay" ch; do
+        chunk+="$ch"
     done
+
+    if [[ -n "$chunk" ]]; then
+        # The submit newline for a pasted command is a delimiter, not prompt text.
+        [[ "$chunk" == *$'\n' ]] && chunk="${chunk%$'\n'}"
+        if [[ -n "$prompt" ]]; then
+            prompt+=$'\n'"$chunk"
+        else
+            prompt="$chunk"
+        fi
+    fi
 
     printf '%s' "$prompt"
 }

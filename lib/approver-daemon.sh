@@ -137,21 +137,21 @@ detect_plan_choice_prompt() {
     local tail_content
     tail_content="$(echo "$content" | tail -n 35)"
 
-    local has_question=0 has_solution_plan=0 has_context=0
+    local has_question=0 has_recommended_choice=0 has_context=0
 
     if echo "$tail_content" | grep -qiE 'Question[[:space:]]+[0-9]+/[0-9]+'; then
         has_question=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(^|[[:space:]])[0-9]+[.)][[:space:]]+Solution plan[[:space:]]*\(Recommended\)|Solution plan[[:space:]]*\(Recommended\)'; then
-        has_solution_plan=1
+    if echo "$tail_content" | grep -qiE '(^|[[:space:]])[0-9]+[.)][[:space:]]+(Solution plan|Prepare only)[[:space:]]*\(Recommended\)|(Solution plan|Prepare only)[[:space:]]*\(Recommended\)'; then
+        has_recommended_choice=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(What do you want me to do|competition link|link|task)'; then
+    if echo "$tail_content" | grep -qiE '(What do you want me to do|Should the execution plan include|submitting a new candidate|competition link|submission slot|Kaggle|link|task)'; then
         has_context=1
     fi
 
-    if (( has_question && has_solution_plan && has_context )); then
+    if (( has_question && has_recommended_choice && has_context )); then
         echo "plan-choice"
         return 0
     fi

@@ -233,6 +233,18 @@ make_plan_choice_prompt() {
 EOF
 }
 
+make_plan_submission_choice_prompt() {
+    cat <<'EOF'
+  Question 1/1 (1 unanswered)
+  Should the execution plan include submitting a new candidate to Kaggle, or only preparing and documenting it?
+
+  _ 1. Prepare only (Recommended)  Research, update notes/todo, build any promising candidate locally, but do not spend a submission slot.
+    2. Auto-submit if better       Submit only if the refreshed evidence and offline checks clearly beat the current v36/v38 path.
+    3. Submit strongest            Use the next available slot for the strongest new candidate even if validation is limited.
+    4. None of the above           Optionally, add details in notes (tab).
+EOF
+}
+
 ###############################################################################
 #              COMMAND EXECUTION APPROVAL PROMPTS                              #
 ###############################################################################
@@ -629,6 +641,9 @@ assert_ok "Plan approval: detects numbered implement-this-plan prompt" \
 assert_ok "Plan approval: detects numbered Solution plan question" \
     detect_plan_choice_prompt "$(make_plan_choice_prompt)"
 
+assert_ok "Plan approval: detects numbered Prepare only submission question" \
+    detect_plan_choice_prompt "$(make_plan_submission_choice_prompt)"
+
 assert_fail "Plan approval: normal planning text is not a prompt" \
     detect_plan_prompt "$(cat <<'PANE'
   Plan:
@@ -646,6 +661,9 @@ assert_fail "Plan approval: generic detector does not approve numbered implement
 
 assert_fail "Plan approval: generic detector does not approve numbered Solution plan question" \
     detect_prompt "$(make_plan_choice_prompt)"
+
+assert_fail "Plan approval: generic detector does not approve numbered Prepare only submission question" \
+    detect_prompt "$(make_plan_submission_choice_prompt)"
 
 _test_plan_marker_valid_same_pane() {
     (
@@ -1169,6 +1187,17 @@ PANE
 }
 assert_ok "control_collect_plan_prompt: collects pasted multiline prompt" _test_control_plan_collects_pasted_lines
 
+_test_control_plan_collects_unterminated_final_line() {
+    (
+        local collected
+        CODEX_YOLO_CONTROL_PLAN_PASTE=1
+        CONTROL_PLAN_PASTE_GRACE=0.01
+        collected="$(printf 'second line\nImprove your best submission, Submit the best local submission to this kaggle competition' | control_collect_plan_prompt "first line")"
+        [[ "$collected" == $'first line\nsecond line\nImprove your best submission, Submit the best local submission to this kaggle competition' ]]
+    )
+}
+assert_ok "control_collect_plan_prompt: preserves pasted final line without trailing newline" _test_control_plan_collects_unterminated_final_line
+
 _test_control_plan_does_not_collect_non_tty_by_default() {
     (
         local collected
@@ -1651,6 +1680,48 @@ _test_control_plan_sends_multiline_prompt() {
     )
 }
 assert_ok "control-pane: /plan sends multiline prompt" _test_control_plan_sends_multiline_prompt
+
+_test_control_plan_command_collects_unterminated_paste() {
+    (
+        local calls audit marker log url continuation expected
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CODEX_YOLO_CONTROL_PLAN_PASTE=1
+        CONTROL_PLAN_PASTE_GRACE=0.01
+        CONTROL_SUBMIT_DELAY=0
+
+        url="https://www.kaggle.com/competitions/arc-prize-2026-arc-agi-3"
+        continuation=$'### Use PLAYWRIGHT\n### Look at kagglevault-main.zip contents\nImprove your best submission, Submit the best local submission to this kaggle competition'
+        control_handle_command "/plan $url" < <(printf '%s' "$continuation") >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        rm -f "$calls" "$audit" "$marker"
+
+        expected=$'send-keys -t sess:agent-1 -l /plan '"$url"$'\n### Use PLAYWRIGHT\n### Look at kagglevault-main.zip contents\nImprove your best submission, Submit the best local submission to this kaggle competition'
+        [[ "$log" == *"$expected"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
+    )
+}
+assert_ok "control-pane: /plan command preserves pasted final line without trailing newline" _test_control_plan_command_collects_unterminated_paste
 
 _test_control_plan_without_prompt() {
     (
@@ -2716,6 +2787,33 @@ _run_integ_plan_choice_with_control_marker() {
 }
 assert_ok "Integration: numbered Solution plan prompt approved only with control marker" _run_integ_plan_choice_with_control_marker
 
+_run_integ_plan_submission_choice_with_control_marker() {
+    _integ_cleanup
+    local audit_tmp marker pane result marker_kept
+    audit_tmp="$(mktemp)"
+    marker="${audit_tmp}.plan-approval"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+    pane="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    printf '%s\t%s\n' "$pane" "$(date +%s)" > "$marker"
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_submission_choice_prompt)" ""
+    sleep 0.2
+
+    timeout 2 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    marker_kept=0
+    [[ -f "$marker" ]] && marker_kept=1
+    rm -f "$audit_tmp" "$marker"
+    _integ_cleanup
+
+    [[ "$result" == *'pattern="plan-choice-control"'* ]] && (( marker_kept ))
+}
+assert_ok "Integration: numbered Prepare only submission prompt approved only with control marker" _run_integ_plan_submission_choice_with_control_marker
+
 _run_integ_plan_without_control_marker() {
     _integ_cleanup
     local audit_tmp result
@@ -2781,6 +2879,28 @@ _run_integ_plan_choice_without_control_marker() {
     [[ "$result" != *"APPROVED"* ]]
 }
 assert_ok "Integration: direct numbered Solution plan prompt is not auto-approved" _run_integ_plan_choice_without_control_marker
+
+_run_integ_plan_submission_choice_without_control_marker() {
+    _integ_cleanup
+    local audit_tmp result
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_submission_choice_prompt)" ""
+    sleep 0.2
+
+    timeout 1.5 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "${audit_tmp}.plan-approval"
+    _integ_cleanup
+
+    [[ "$result" != *"APPROVED"* ]]
+}
+assert_ok "Integration: direct numbered Prepare only submission prompt is not auto-approved" _run_integ_plan_submission_choice_without_control_marker
 
 # ── Integration: Slash picker veto ────────────────────────────────────────────
 
