@@ -18,31 +18,48 @@ FILTER="${1:-}"
 
 _red=$'\033[0;31m' _green=$'\033[0;32m' _yellow=$'\033[0;33m' _reset=$'\033[0m'
 
+_print_captured_output() {
+    local output_file="$1"
+    [[ -s "$output_file" ]] || return 0
+    echo "        captured output:"
+    sed 's/^/        | /' "$output_file"
+}
+
 assert_ok() {
     local desc="$1"; shift
+    local output_file
     TOTAL=$((TOTAL+1))
     if [[ -n "$FILTER" && "$desc" != *"$FILTER"* ]]; then
         SKIP=$((SKIP+1)); return 0
     fi
-    if "$@" >/dev/null 2>&1; then
+    output_file="$(mktemp)"
+    if "$@" >"$output_file" 2>&1; then
+        rm -f "$output_file"
         PASS=$((PASS+1))
         (( VERBOSE )) && echo "  ${_green}PASS${_reset} $desc"
     else
         FAIL=$((FAIL+1))
         echo "  ${_red}FAIL${_reset} $desc"
+        _print_captured_output "$output_file"
+        rm -f "$output_file"
     fi
 }
 
 assert_fail() {
     local desc="$1"; shift
+    local output_file
     TOTAL=$((TOTAL+1))
     if [[ -n "$FILTER" && "$desc" != *"$FILTER"* ]]; then
         SKIP=$((SKIP+1)); return 0
     fi
-    if "$@" >/dev/null 2>&1; then
+    output_file="$(mktemp)"
+    if "$@" >"$output_file" 2>&1; then
         FAIL=$((FAIL+1))
         echo "  ${_red}FAIL${_reset} $desc  (expected failure, got success)"
+        _print_captured_output "$output_file"
+        rm -f "$output_file"
     else
+        rm -f "$output_file"
         PASS=$((PASS+1))
         (( VERBOSE )) && echo "  ${_green}PASS${_reset} $desc"
     fi
@@ -1581,6 +1598,28 @@ _control_start_read_agent() {
         "bash -lc 'printf \"READY\\n\"; while IFS= read -r line; do printf \"READ:%s\\n\" \"\$line\"; done'"
 }
 
+_control_debug_dump() {
+    local label="$1"
+
+    echo "DEBUG: $label"
+    echo "DEBUG: tmux version: $(tmux -V 2>/dev/null || printf 'unavailable')"
+    echo "DEBUG: session: $_CONTROL_SESSION"
+    echo "DEBUG: windows:"
+    tmux list-windows -t "$_CONTROL_SESSION" -F '#{window_index}:#{window_name}:active=#{window_active}' 2>&1 || true
+    echo "DEBUG: panes:"
+    tmux list-panes -a -t "$_CONTROL_SESSION" -F '#{session_name}:#{window_name}.#{pane_index} #{pane_id} active=#{pane_active} dead=#{pane_dead} command=#{pane_current_command}' 2>&1 || true
+    echo "DEBUG: control pane capture:"
+    tmux capture-pane -pt "$_CONTROL_SESSION:control" -S -120 2>&1 || true
+    echo "DEBUG: agent pane capture:"
+    tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -120 2>&1 || true
+    echo "DEBUG: audit log:"
+    if [[ -f "$_CONTROL_AUDIT" ]]; then
+        sed 's/^/AUDIT: /' "$_CONTROL_AUDIT"
+    else
+        echo "DEBUG: audit log missing: $_CONTROL_AUDIT"
+    fi
+}
+
 _control_wait_for_capture() {
     local target="$1" needle="$2" attempts="${3:-50}" delay="${4:-0.1}"
     local capture attempt
@@ -1591,6 +1630,10 @@ _control_wait_for_capture() {
         sleep "$delay"
     done
 
+    echo "DEBUG: timed out waiting for target=$target attempts=$attempts delay=$delay"
+    echo "DEBUG: missing needle: $needle"
+    echo "DEBUG: last capture for $target:"
+    printf '%s\n' "$capture"
     return 1
 }
 
@@ -1771,16 +1814,19 @@ _test_control_plan_interactive_paste_without_final_newline() {
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
     _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_debug_dump "agent did not become ready before interactive paste test"
         _control_cleanup
         return 1
     }
 
     tmux new-window -t "$_CONTROL_SESSION" -n "control" \
         "CODEX_YOLO_CONTROL_PLAN_PASTE=1 CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE=1 CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard" || {
+            _control_debug_dump "failed to create control window"
             _control_cleanup
             return 1
         }
     _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
         _control_cleanup
         return 1
     }
@@ -1790,26 +1836,35 @@ _test_control_plan_interactive_paste_without_final_newline() {
     paste_buffer="control-plan-paste-$$"
     printf '%s' "$input" | tmux load-buffer -b "$paste_buffer" - || {
         tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
+        _control_debug_dump "failed to load tmux paste buffer"
         _control_cleanup
         return 1
     }
     tmux paste-buffer -d -b "$paste_buffer" -t "$_CONTROL_SESSION:control" || {
         tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
+        _control_debug_dump "failed to paste tmux buffer into control pane"
         _control_cleanup
         return 1
     }
     _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:Improve your best submission, submit the best local submission for this task" 120 0.1 || {
+        _control_debug_dump "agent pane did not receive final pasted line"
         _control_cleanup
         return 1
     }
 
     capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
-    _control_cleanup
+    if [[ "$capture" == *"READ:/plan https://example.com/projects/arc-task"* ]] && \
+       [[ "$capture" == *"READ:### Inspect the web reference"* ]] && \
+       [[ "$capture" == *"READ:### Review the local archive contents"* ]] && \
+       [[ "$capture" == *"READ:Improve your best submission, submit the best local submission for this task"* ]]; then
+        _control_cleanup
+        return 0
+    fi
 
-    [[ "$capture" == *"READ:/plan https://example.com/projects/arc-task"* ]] && \
-    [[ "$capture" == *"READ:### Inspect the web reference"* ]] && \
-    [[ "$capture" == *"READ:### Review the local archive contents"* ]] && \
-    [[ "$capture" == *"READ:Improve your best submission, submit the best local submission for this task"* ]]
+    echo "DEBUG: final capture assertion failed"
+    _control_debug_dump "final interactive paste assertion mismatch"
+    _control_cleanup
+    return 1
 }
 assert_ok "control-pane: interactive /plan paste preserves final line without trailing newline" _test_control_plan_interactive_paste_without_final_newline
 
