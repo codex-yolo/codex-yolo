@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — Install codex-yolo from source
-# Usage: curl -fsSL https://<url>/install.sh | bash && export PATH="$HOME/.local/bin:$PATH"
+# Usage: curl -fsSL https://<url>/install.sh | bash && export PATH="${CODEX_YOLO_BIN_DIR:-$HOME/.local/bin}:${CODEX_YOLO_HOME:-$HOME/.codex-yolo}/bin:$PATH"
 #        ./install.sh --local   # install from the current local repo
 set -euo pipefail
 
