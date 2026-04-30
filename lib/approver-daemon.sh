@@ -143,11 +143,11 @@ detect_plan_choice_prompt() {
         has_question=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(^|[[:space:]])[0-9]+[.)][[:space:]]+(Solution plan|Prepare only)[[:space:]]*\(Recommended\)|(Solution plan|Prepare only)[[:space:]]*\(Recommended\)'; then
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*([_❯][[:space:]]*)[0-9]+[.)][[:space:]]+[^[:cntrl:]]*\(Recommended\)([[:space:]]|$)'; then
         has_recommended_choice=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(What do you want me to do|Should the execution plan include|submitting a new candidate|competition link|reference link|submission slot|link|task)'; then
+    if echo "$tail_content" | grep -qiE '(What do you want me to do|execution plan|submitting a new candidate|reference link|submission slot|link|task)'; then
         has_context=1
     fi
 

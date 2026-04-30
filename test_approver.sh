@@ -262,6 +262,21 @@ make_plan_submission_choice_prompt() {
 EOF
 }
 
+make_plan_research_refresh_choice_prompt() {
+    cat <<'EOF'
+  A few constraints are now clear: the existing refresh script writes timestamped snapshots under /tmp/research_snapshots.
+  The current repo state points to build 42 as best confirmed, with a rerun pending as of the latest notes.
+
+  Question 1/3 (3 unanswered)
+  What should the execution plan optimize for first?
+
+  _ 1. Research refresh (Recommended)  Refresh external discussions, code, papers, and notes before changing experiments.
+    2. New experiment                  Prioritize implementing one promising candidate even if research notes are less complete.
+    3. Submission ops                  Focus on monitoring pending work and preparing the next safe submission path.
+    4. None of the above               Optionally, add details in notes (tab).
+EOF
+}
+
 ###############################################################################
 #              COMMAND EXECUTION APPROVAL PROMPTS                              #
 ###############################################################################
@@ -661,6 +676,9 @@ assert_ok "Plan approval: detects numbered Solution plan question" \
 assert_ok "Plan approval: detects numbered Prepare only submission question" \
     detect_plan_choice_prompt "$(make_plan_submission_choice_prompt)"
 
+assert_ok "Plan approval: detects numbered Research refresh question" \
+    detect_plan_choice_prompt "$(make_plan_research_refresh_choice_prompt)"
+
 assert_fail "Plan approval: normal planning text is not a prompt" \
     detect_plan_prompt "$(cat <<'PANE'
   Plan:
@@ -681,6 +699,9 @@ assert_fail "Plan approval: generic detector does not approve numbered Solution 
 
 assert_fail "Plan approval: generic detector does not approve numbered Prepare only submission question" \
     detect_prompt "$(make_plan_submission_choice_prompt)"
+
+assert_fail "Plan approval: generic detector does not approve numbered Research refresh question" \
+    detect_prompt "$(make_plan_research_refresh_choice_prompt)"
 
 _test_plan_marker_valid_same_pane() {
     (
