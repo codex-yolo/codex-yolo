@@ -19,6 +19,7 @@ CONTROL_PERMISSIONS_OPEN_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_OPEN_ATTEMPT
 CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETRY_DELAY:-2}"
 CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
+CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.05}"
 
 control_audit() {
     local msg="$1"
@@ -78,6 +79,41 @@ control_parse_loop_command() {
 
     seconds="$(control_parse_interval "$interval")" || return 1
     printf '%s\t%s\t%s\n' "$interval" "$seconds" "$prompt"
+}
+
+control_plan_paste_enabled() {
+    case "${CODEX_YOLO_CONTROL_PLAN_PASTE:-auto}" in
+        1|true|yes|on) return 0 ;;
+        0|false|no|off) return 1 ;;
+    esac
+
+    [[ -t 0 ]]
+}
+
+control_collect_plan_prompt() {
+    local prompt="$1"
+    local line delay captured=0
+
+    control_plan_paste_enabled || {
+        printf '%s' "$prompt"
+        return 0
+    }
+
+    delay="$CONTROL_PLAN_PASTE_GRACE"
+    if [[ ! "$delay" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+        delay=0.05
+    fi
+
+    while IFS= read -r -t "$delay" line; do
+        if [[ -n "$prompt" || "$captured" == "1" ]]; then
+            prompt+=$'\n'"$line"
+        else
+            prompt="$line"
+        fi
+        captured=1
+    done
+
+    printf '%s' "$prompt"
 }
 
 control_agent_exists() {
@@ -511,6 +547,7 @@ control_handle_command() {
         /plan|/plan\ *|$'/plan\t'*)
             rest="${line#/plan}"
             rest="$(control_ltrim "$rest")"
+            rest="$(control_collect_plan_prompt "$rest")"
             control_start_plan "$rest"
             ;;
         /loop*)

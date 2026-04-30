@@ -131,6 +131,34 @@ detect_plan_prompt() {
     return 1
 }
 
+detect_plan_choice_prompt() {
+    local content="$1"
+
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 35)"
+
+    local has_question=0 has_solution_plan=0 has_context=0
+
+    if echo "$tail_content" | grep -qiE 'Question[[:space:]]+[0-9]+/[0-9]+'; then
+        has_question=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '(^|[[:space:]])[0-9]+[.)][[:space:]]+Solution plan[[:space:]]*\(Recommended\)|Solution plan[[:space:]]*\(Recommended\)'; then
+        has_solution_plan=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '(What do you want me to do|competition link|link|task)'; then
+        has_context=1
+    fi
+
+    if (( has_question && has_solution_plan && has_context )); then
+        echo "plan-choice"
+        return 0
+    fi
+
+    return 1
+}
+
 plan_approval_file() {
     if [[ -n "${CODEX_YOLO_PLAN_APPROVAL_FILE:-}" ]]; then
         printf '%s\n' "$CODEX_YOLO_PLAN_APPROVAL_FILE"
@@ -244,7 +272,14 @@ main_loop() {
             # Detect control-pane initiated plan approval prompts before generic
             # prompts, so direct /plan use in an agent pane is not auto-approved.
             local pattern
-            if pattern="$(detect_plan_prompt "$content")"; then
+            if pattern="$(detect_plan_choice_prompt "$content")"; then
+                if plan_approval_marker_valid "$pane"; then
+                    tmux send-keys -t "$pane" Enter 2>/dev/null || continue
+                    LAST_APPROVED["$pane"]="$(date +%s)"
+                    audit "$pane" "plan-choice-control"
+                fi
+                continue
+            elif pattern="$(detect_plan_prompt "$content")"; then
                 if plan_approval_marker_valid "$pane"; then
                     tmux send-keys -t "$pane" Enter 2>/dev/null || continue
                     clear_plan_approval_marker

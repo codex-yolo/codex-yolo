@@ -134,7 +134,7 @@ Available commands:
 | Command | Action |
 |---|---|
 | `/permissions auto-review` | Open Codex `/permissions`, make Auto-review current for `agent-1`, then return to chat |
-| `/plan [prompt]` | Send Codex `/plan` to `agent-1`; plan approval is auto-confirmed only for this control-pane command |
+| `/plan [prompt]` | Send Codex `/plan` to `agent-1`; pasted multiline prompts are supported and plan approval is auto-confirmed only for this control-pane command |
 | `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled |
 | `/loops` | List active loops |
 | `/loops cancel <id>` | Cancel one loop |
@@ -142,6 +142,7 @@ Available commands:
 
 Intervals are whole numbers with `s`, `m`, `h`, or `d`, for example `30s`, `15m`, `1h`, or `1d`.
 `/plan` and `/loop` are disabled in worktree mode because agent windows run `codex exec` and may exit.
+When pasting a multiline `/plan` command into the interactive control pane, lines pasted immediately after the first `/plan` line are sent as part of the same plan prompt.
 
 ## Options
 

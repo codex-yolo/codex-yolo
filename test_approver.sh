@@ -88,7 +88,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -211,6 +211,15 @@ make_plan_prompt() {
 
   ❯ Yes, proceed
     No, and tell Codex what to do differently
+EOF
+}
+
+make_plan_choice_prompt() {
+    cat <<'EOF'
+  Question 1/1 (1 unanswered)
+  What do you want me to do with the ARC-AGI-3 competition link?
+
+  _ 1. Solution plan (Recommended)  Produce a concrete engineering/research plan for building a Kaggle submission.
 EOF
 }
 
@@ -604,6 +613,9 @@ section "detect_plan_prompt — scoped plan approval"
 assert_ok "Plan approval: detects proceed-with-plan prompt" \
     detect_plan_prompt "$(make_plan_prompt)"
 
+assert_ok "Plan approval: detects numbered Solution plan question" \
+    detect_plan_choice_prompt "$(make_plan_choice_prompt)"
+
 assert_fail "Plan approval: normal planning text is not a prompt" \
     detect_plan_prompt "$(cat <<'PANE'
   Plan:
@@ -615,6 +627,9 @@ PANE
 
 assert_fail "Plan approval: generic detector does not approve plan prompt" \
     detect_prompt "$(make_plan_prompt)"
+
+assert_fail "Plan approval: generic detector does not approve numbered Solution plan question" \
+    detect_prompt "$(make_plan_choice_prompt)"
 
 _test_plan_marker_valid_same_pane() {
     (
@@ -1122,6 +1137,34 @@ assert_fail "control_parse_loop_command: rejects missing prompt" \
 assert_fail "control_parse_loop_command: rejects invalid interval" \
     control_parse_loop_command "/loop 1x retry"
 
+_test_control_plan_collects_pasted_lines() {
+    (
+        local collected
+        CODEX_YOLO_CONTROL_PLAN_PASTE=1
+        CONTROL_PLAN_PASTE_GRACE=0.01
+        collected="$(control_collect_plan_prompt "first line" <<'PANE'
+second line
+
+fourth line
+PANE
+)"
+        [[ "$collected" == $'first line\nsecond line\n\nfourth line' ]]
+    )
+}
+assert_ok "control_collect_plan_prompt: collects pasted multiline prompt" _test_control_plan_collects_pasted_lines
+
+_test_control_plan_does_not_collect_non_tty_by_default() {
+    (
+        local collected
+        collected="$(control_collect_plan_prompt "first line" <<'PANE'
+second line
+PANE
+)"
+        [[ "$collected" == "first line" ]]
+    )
+}
+assert_ok "control_collect_plan_prompt: leaves piped input line-by-line" _test_control_plan_does_not_collect_non_tty_by_default
+
 section "control-pane — Permissions Auto-review"
 
 _permissions_page_current="$(cat <<'PANE'
@@ -1556,6 +1599,42 @@ _test_control_plan_sends_prompt_and_marker() {
     )
 }
 assert_ok "control-pane: /plan sends prompt and marker" _test_control_plan_sends_prompt_and_marker
+
+_test_control_plan_sends_multiline_prompt() {
+    (
+        local calls audit marker log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CONTROL_SUBMIT_DELAY=0
+        control_start_plan $'first line\nsecond line\n\nfourth line' >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        rm -f "$calls" "$audit" "$marker"
+
+        [[ "$log" == *$'send-keys -t sess:agent-1 -l /plan first line\nsecond line\n\nfourth line'* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
+    )
+}
+assert_ok "control-pane: /plan sends multiline prompt" _test_control_plan_sends_multiline_prompt
 
 _test_control_plan_without_prompt() {
     (
@@ -2366,7 +2445,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2403,7 +2482,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2441,7 +2520,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2477,7 +2556,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2514,7 +2593,7 @@ OUTPUT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2567,6 +2646,33 @@ _run_integ_plan_with_control_marker() {
 }
 assert_ok "Integration: plan prompt approved only with control marker" _run_integ_plan_with_control_marker
 
+_run_integ_plan_choice_with_control_marker() {
+    _integ_cleanup
+    local audit_tmp marker pane result marker_kept
+    audit_tmp="$(mktemp)"
+    marker="${audit_tmp}.plan-approval"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+    pane="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    printf '%s\t%s\n' "$pane" "$(date +%s)" > "$marker"
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_choice_prompt)" ""
+    sleep 0.2
+
+    timeout 2 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    marker_kept=0
+    [[ -f "$marker" ]] && marker_kept=1
+    rm -f "$audit_tmp" "$marker"
+    _integ_cleanup
+
+    [[ "$result" == *'pattern="plan-choice-control"'* ]] && (( marker_kept ))
+}
+assert_ok "Integration: numbered Solution plan prompt approved only with control marker" _run_integ_plan_choice_with_control_marker
+
 _run_integ_plan_without_control_marker() {
     _integ_cleanup
     local audit_tmp result
@@ -2588,6 +2694,28 @@ _run_integ_plan_without_control_marker() {
     [[ "$result" != *"APPROVED"* ]]
 }
 assert_ok "Integration: direct agent /plan prompt is not auto-approved" _run_integ_plan_without_control_marker
+
+_run_integ_plan_choice_without_control_marker() {
+    _integ_cleanup
+    local audit_tmp result
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_choice_prompt)" ""
+    sleep 0.2
+
+    timeout 1.5 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "${audit_tmp}.plan-approval"
+    _integ_cleanup
+
+    [[ "$result" != *"APPROVED"* ]]
+}
+assert_ok "Integration: direct numbered Solution plan prompt is not auto-approved" _run_integ_plan_choice_without_control_marker
 
 # ── Integration: Slash picker veto ────────────────────────────────────────────
 
@@ -2617,7 +2745,7 @@ PANE
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
