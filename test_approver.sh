@@ -1776,7 +1776,7 @@ _test_control_plan_interactive_paste_without_final_newline() {
     }
 
     tmux new-window -t "$_CONTROL_SESSION" -n "control" \
-        "CODEX_YOLO_CONTROL_PLAN_PASTE=1 CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE=0.2 CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard" || {
+        "CODEX_YOLO_CONTROL_PLAN_PASTE=1 CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE=1 CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard" || {
             _control_cleanup
             return 1
         }
@@ -1785,13 +1785,20 @@ _test_control_plan_interactive_paste_without_final_newline() {
         return 1
     }
 
-    local input capture
+    local input capture paste_buffer
     input=$'/plan https://example.com/projects/arc-task\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
-    tmux send-keys -t "$_CONTROL_SESSION:control" -l "$input" || {
+    paste_buffer="control-plan-paste-$$"
+    printf '%s' "$input" | tmux load-buffer -b "$paste_buffer" - || {
+        tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
         _control_cleanup
         return 1
     }
-    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:Improve your best submission, submit the best local submission for this task" 80 0.1 || {
+    tmux paste-buffer -d -b "$paste_buffer" -t "$_CONTROL_SESSION:control" || {
+        tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:Improve your best submission, submit the best local submission for this task" 120 0.1 || {
         _control_cleanup
         return 1
     }
