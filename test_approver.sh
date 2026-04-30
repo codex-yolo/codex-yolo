@@ -1578,7 +1578,20 @@ _control_cleanup() {
 
 _control_start_read_agent() {
     tmux new-session -d -s "$_CONTROL_SESSION" -n "agent-1" \
-        "bash -lc 'while IFS= read -r line; do printf \"READ:%s\\n\" \"\$line\"; done'"
+        "bash -lc 'printf \"READY\\n\"; while IFS= read -r line; do printf \"READ:%s\\n\" \"\$line\"; done'"
+}
+
+_control_wait_for_capture() {
+    local target="$1" needle="$2" attempts="${3:-50}" delay="${4:-0.1}"
+    local capture attempt
+
+    for (( attempt=1; attempt<=attempts; attempt++ )); do
+        capture="$(tmux capture-pane -pt "$target" -S -100 2>/dev/null || true)"
+        [[ "$capture" == *"$needle"* ]] && return 0
+        sleep "$delay"
+    done
+
+    return 1
 }
 
 _test_control_send_prompt_uses_enter_key() {
@@ -1613,13 +1626,20 @@ _test_control_send_prompt_to_agent() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
-    sleep 0.2
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     local old_delay="$CONTROL_SUBMIT_DELAY"
     CONTROL_SUBMIT_DELAY=0.05
     control_send_prompt "$_CONTROL_SESSION" "$_CONTROL_AUDIT" "agent-1" "control dispatch test" 1 || return 1
     CONTROL_SUBMIT_DELAY="$old_delay"
-    sleep 0.3
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:control dispatch test" 50 0.1 || {
+        CONTROL_SUBMIT_DELAY="$old_delay"
+        _control_cleanup
+        return 1
+    }
 
     local capture
     capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
@@ -1750,14 +1770,20 @@ _test_control_plan_interactive_paste_without_final_newline() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
-    sleep 0.2
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     tmux new-window -t "$_CONTROL_SESSION" -n "control" \
         "CODEX_YOLO_CONTROL_PLAN_PASTE=1 CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE=0.2 CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard" || {
             _control_cleanup
             return 1
         }
-    sleep 0.5
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     local input capture
     input=$'/plan https://example.com/projects/arc-task\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
@@ -1765,7 +1791,10 @@ _test_control_plan_interactive_paste_without_final_newline() {
         _control_cleanup
         return 1
     }
-    sleep 1.0
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:Improve your best submission, submit the best local submission for this task" 80 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
     _control_cleanup
@@ -1882,7 +1911,10 @@ _test_control_plan_to_agent() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
-    sleep 0.2
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     SESSION_NAME="$_CONTROL_SESSION"
     AUDIT_LOG="$_CONTROL_AUDIT"
@@ -1890,9 +1922,16 @@ _test_control_plan_to_agent() {
 
     local old_delay="$CONTROL_SUBMIT_DELAY"
     CONTROL_SUBMIT_DELAY=0.05
-    control_start_plan "control plan dispatch test" || return 1
+    control_start_plan "control plan dispatch test" || {
+        CONTROL_SUBMIT_DELAY="$old_delay"
+        _control_cleanup
+        return 1
+    }
     CONTROL_SUBMIT_DELAY="$old_delay"
-    sleep 0.3
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan control plan dispatch test" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     local capture marker
     capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
@@ -1907,7 +1946,10 @@ _test_control_loop_dispatches_immediately() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
-    sleep 0.2
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     SESSION_NAME="$_CONTROL_SESSION"
     AUDIT_LOG="$_CONTROL_AUDIT"
@@ -1921,8 +1963,17 @@ _test_control_loop_dispatches_immediately() {
 
     local old_delay="$CONTROL_SUBMIT_DELAY"
     CONTROL_SUBMIT_DELAY=0.05
-    control_start_loop "5s" "5" "immediate loop dispatch test" || return 1
-    sleep 0.4
+    control_start_loop "5s" "5" "immediate loop dispatch test" || {
+        CONTROL_SUBMIT_DELAY="$old_delay"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:immediate loop dispatch test" 50 0.1 || {
+        control_cancel_loop 1 >/dev/null 2>&1 || true
+        CONTROL_SUBMIT_DELAY="$old_delay"
+        _control_cleanup
+        return 1
+    }
     control_cancel_loop 1 >/dev/null 2>&1 || true
     CONTROL_SUBMIT_DELAY="$old_delay"
 
@@ -1937,7 +1988,10 @@ _test_control_loop_dispatches_prompt() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
     _control_start_read_agent || return 1
-    sleep 0.2
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
 
     {
         printf '/loop 2s loop dispatch test\n'
