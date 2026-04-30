@@ -1859,7 +1859,7 @@ _test_control_plan_interactive_paste_without_final_newline() {
         return 1
     }
 
-    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:agent-1" -100 || true)"
     if [[ "$capture" == *"READ:/plan https://example.com/projects/arc-task"* ]] && \
        [[ "$capture" == *"READ:### Inspect the web reference"* ]] && \
        [[ "$capture" == *"READ:### Review the local archive contents"* ]] && \
