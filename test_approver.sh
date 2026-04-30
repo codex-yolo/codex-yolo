@@ -88,7 +88,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -195,6 +195,21 @@ make_network_prompt() {
 
   ❯ Yes, just this once
     Yes, and allow this host for this session
+    No, and tell Codex what to do differently
+EOF
+}
+
+make_plan_prompt() {
+    cat <<'EOF'
+  Proposed plan
+
+  1. Inspect the failing tests.
+  2. Patch the smallest affected path.
+  3. Run focused verification.
+
+  Would you like to proceed with this plan?
+
+  ❯ Yes, proceed
     No, and tell Codex what to do differently
 EOF
 }
@@ -579,6 +594,89 @@ assert_ok "Known limitation: code discussing prompts triggers detection" \
   PASSED
 PANE
 )"
+
+###############################################################################
+#              PLAN APPROVAL PROMPT DETECTION                                  #
+###############################################################################
+
+section "detect_plan_prompt — scoped plan approval"
+
+assert_ok "Plan approval: detects proceed-with-plan prompt" \
+    detect_plan_prompt "$(make_plan_prompt)"
+
+assert_fail "Plan approval: normal planning text is not a prompt" \
+    detect_plan_prompt "$(cat <<'PANE'
+  Plan:
+  1. Read the code.
+  2. Implement the change.
+  3. Run tests.
+PANE
+)"
+
+assert_fail "Plan approval: generic detector does not approve plan prompt" \
+    detect_prompt "$(make_plan_prompt)"
+
+_test_plan_marker_valid_same_pane() {
+    (
+        local marker old_file
+        marker="$(mktemp)"
+        old_file="${CODEX_YOLO_PLAN_APPROVAL_FILE:-}"
+        CODEX_YOLO_PLAN_APPROVAL_FILE="$marker"
+        printf '%%7\t%s\n' "$(date +%s)" > "$marker"
+        plan_approval_marker_valid "%7"
+        local rc=$?
+        if [[ -n "$old_file" ]]; then
+            CODEX_YOLO_PLAN_APPROVAL_FILE="$old_file"
+        else
+            unset CODEX_YOLO_PLAN_APPROVAL_FILE
+        fi
+        rm -f "$marker"
+        return "$rc"
+    )
+}
+assert_ok "Plan approval marker: accepts matching pane" _test_plan_marker_valid_same_pane
+
+_test_plan_marker_rejects_other_pane() {
+    (
+        local marker old_file rc
+        marker="$(mktemp)"
+        old_file="${CODEX_YOLO_PLAN_APPROVAL_FILE:-}"
+        CODEX_YOLO_PLAN_APPROVAL_FILE="$marker"
+        printf '%%7\t%s\n' "$(date +%s)" > "$marker"
+        plan_approval_marker_valid "%8"
+        rc=$?
+        if [[ -n "$old_file" ]]; then
+            CODEX_YOLO_PLAN_APPROVAL_FILE="$old_file"
+        else
+            unset CODEX_YOLO_PLAN_APPROVAL_FILE
+        fi
+        rm -f "$marker"
+        return "$rc"
+    )
+}
+assert_fail "Plan approval marker: rejects different pane" _test_plan_marker_rejects_other_pane
+
+_test_plan_marker_removes_stale() {
+    (
+        local marker old_file old_ttl rc
+        marker="$(mktemp)"
+        old_file="${CODEX_YOLO_PLAN_APPROVAL_FILE:-}"
+        old_ttl="$PLAN_APPROVAL_TTL"
+        CODEX_YOLO_PLAN_APPROVAL_FILE="$marker"
+        PLAN_APPROVAL_TTL=1
+        printf '%%7\t%s\n' "$(( $(date +%s) - 10 ))" > "$marker"
+        plan_approval_marker_valid "%7"
+        rc=$?
+        PLAN_APPROVAL_TTL="$old_ttl"
+        if [[ -n "$old_file" ]]; then
+            CODEX_YOLO_PLAN_APPROVAL_FILE="$old_file"
+        else
+            unset CODEX_YOLO_PLAN_APPROVAL_FILE
+        fi
+        (( rc != 0 )) && [[ ! -f "$marker" ]]
+    )
+}
+assert_ok "Plan approval marker: removes stale marker" _test_plan_marker_removes_stale
 
 ###############################################################################
 #              SLASH COMMAND PICKER DETECTION (detect_slash_picker)            #
@@ -1419,6 +1517,172 @@ _test_control_send_prompt_to_agent() {
 }
 assert_ok "control_send_prompt: sends prompt to agent-1" _test_control_send_prompt_to_agent
 
+_test_control_plan_sends_prompt_and_marker() {
+    (
+        local calls audit marker log audit_log marker_content
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CONTROL_SUBMIT_DELAY=0
+        control_start_plan "fix auth first" >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        marker_content="$(cat "$marker")"
+        rm -f "$calls" "$audit" "$marker"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /plan fix auth first"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$marker_content" == %7$'\t'* ]] && \
+        [[ "$audit_log" == *"PLAN sent to agent-1: /plan fix auth first"* ]]
+    )
+}
+assert_ok "control-pane: /plan sends prompt and marker" _test_control_plan_sends_prompt_and_marker
+
+_test_control_plan_without_prompt() {
+    (
+        local calls audit marker log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CONTROL_SUBMIT_DELAY=0
+        control_handle_command "/plan" >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        rm -f "$calls" "$audit" "$marker"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /plan"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
+    )
+}
+assert_ok "control-pane: /plan without prompt sends slash command" _test_control_plan_without_prompt
+
+_test_control_plan_removes_marker_on_send_failure() {
+    (
+        local calls audit marker
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    return 1
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CONTROL_SUBMIT_DELAY=0
+        if control_start_plan "will fail" >/dev/null; then
+            exit 1
+        fi
+
+        rm -f "$calls" "$audit"
+        [[ ! -f "$marker" ]]
+    )
+}
+assert_ok "control-pane: /plan removes marker on send failure" _test_control_plan_removes_marker_on_send_failure
+
+_test_control_plan_rejects_worktree_mode() {
+    (
+        local calls audit
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="worktree"
+        if control_start_plan "nope" >/dev/null; then
+            exit 1
+        fi
+
+        [[ ! -s "$calls" ]]
+        local rc=$?
+        rm -f "$calls" "$audit" "${audit}.plan-approval"
+        return "$rc"
+    )
+}
+assert_ok "control-pane: /plan is disabled in worktree mode" _test_control_plan_rejects_worktree_mode
+
+_test_control_plan_to_agent() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    sleep 0.2
+
+    SESSION_NAME="$_CONTROL_SESSION"
+    AUDIT_LOG="$_CONTROL_AUDIT"
+    SESSION_MODE="standard"
+
+    local old_delay="$CONTROL_SUBMIT_DELAY"
+    CONTROL_SUBMIT_DELAY=0.05
+    control_start_plan "control plan dispatch test" || return 1
+    CONTROL_SUBMIT_DELAY="$old_delay"
+    sleep 0.3
+
+    local capture marker
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    marker="${_CONTROL_AUDIT}.plan-approval"
+    _control_cleanup
+    rm -f "$marker"
+    [[ "$capture" == *"READ:/plan control plan dispatch test"* ]]
+}
+assert_ok "control-pane: /plan dispatches to agent-1" _test_control_plan_to_agent
+
 _test_control_loop_dispatches_immediately() {
     _control_cleanup
     : > "$_CONTROL_AUDIT"
@@ -2102,7 +2366,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2139,7 +2403,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2177,7 +2441,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2213,7 +2477,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2250,7 +2514,7 @@ OUTPUT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -2273,6 +2537,57 @@ assert_ok  "Integration: file edit prompt detected and approved" _run_integ_edit
 assert_ok  "Integration: tool call prompt detected and approved" _run_integ_tool
 assert_ok  "Integration: trust directory prompt detected and approved" _run_integ_trust
 assert_ok  "Integration: no false positive on normal output" _run_integ_no_false_positive
+
+# ── Integration: Scoped plan approval ─────────────────────────────────────────
+
+_run_integ_plan_with_control_marker() {
+    _integ_cleanup
+    local audit_tmp marker pane result
+    audit_tmp="$(mktemp)"
+    marker="${audit_tmp}.plan-approval"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+    pane="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    printf '%s\t%s\n' "$pane" "$(date +%s)" > "$marker"
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_prompt)" ""
+    sleep 0.2
+
+    timeout 2 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    local marker_removed=0
+    [[ ! -f "$marker" ]] && marker_removed=1
+    rm -f "$audit_tmp" "$marker"
+    _integ_cleanup
+
+    [[ "$result" == *'pattern="plan-control"'* ]] && (( marker_removed ))
+}
+assert_ok "Integration: plan prompt approved only with control marker" _run_integ_plan_with_control_marker
+
+_run_integ_plan_without_control_marker() {
+    _integ_cleanup
+    local audit_tmp result
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_prompt)" ""
+    sleep 0.2
+
+    timeout 1.5 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "${audit_tmp}.plan-approval"
+    _integ_cleanup
+
+    [[ "$result" != *"APPROVED"* ]]
+}
+assert_ok "Integration: direct agent /plan prompt is not auto-approved" _run_integ_plan_without_control_marker
 
 # ── Integration: Slash picker veto ────────────────────────────────────────────
 
@@ -2302,7 +2617,7 @@ PANE
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2

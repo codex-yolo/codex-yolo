@@ -126,6 +126,34 @@ control_capture_target() {
     tmux capture-pane -p -t "$target" -S -100 2>/dev/null
 }
 
+control_plan_marker_file() {
+    [[ -n "${AUDIT_LOG:-}" ]] || return 1
+    printf '%s.plan-approval\n' "$AUDIT_LOG"
+}
+
+control_plan_target_pane() {
+    local session="$1" target_window="$2"
+    tmux display-message -p -t "${session}:${target_window}" '#{pane_id}' 2>/dev/null
+}
+
+control_arm_plan_approval() {
+    local session="$1" target_window="$2"
+    local marker pane_id now
+
+    marker="$(control_plan_marker_file)" || return 1
+    pane_id="$(control_plan_target_pane "$session" "$target_window")" || return 1
+    [[ -n "$pane_id" ]] || return 1
+    now="$(date +%s)"
+
+    printf '%s\t%s\n' "$pane_id" "$now" > "$marker" 2>/dev/null
+}
+
+control_disarm_plan_approval() {
+    local marker
+    marker="$(control_plan_marker_file 2>/dev/null)" || return 0
+    rm -f "$marker" 2>/dev/null || true
+}
+
 control_set_auto_review() {
     local session="$1" audit_log="$2" target_window="${3:-agent-1}"
     local target="${session}:${target_window}"
@@ -327,6 +355,66 @@ control_start_loop() {
     control_audit "LOOP #$loop_id scheduled: every $interval to $target_window: $preview"
 }
 
+control_send_plan_command() {
+    local session="$1" audit_log="$2" target_window="$3" command="$4"
+    local target="${session}:${target_window}"
+    local preview
+
+    if tmux send-keys -t "$target" -l "$command" 2>/dev/null; then
+        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+        tmux send-keys -t "$target" Enter 2>/dev/null || {
+            echo "failed to submit /plan to $target_window"
+            AUDIT_LOG="$audit_log" control_audit "PLAN submit failed: $target_window"
+            return 1
+        }
+
+        preview="$(control_preview "$command")"
+        AUDIT_LOG="$audit_log" control_audit "PLAN sent to $target_window: $preview"
+        return 0
+    fi
+
+    echo "failed to send /plan to $target_window"
+    AUDIT_LOG="$audit_log" control_audit "PLAN send failed: $target_window"
+    return 1
+}
+
+control_start_plan() {
+    local prompt="${1:-}"
+    local target_window="agent-1"
+    local command="/plan"
+    local preview
+
+    if [[ "$SESSION_MODE" == "worktree" ]]; then
+        echo "/plan is disabled in worktree mode because agent windows run codex exec and may exit."
+        control_audit "PLAN rejected in worktree mode"
+        return 1
+    fi
+
+    if ! control_agent_exists "$SESSION_NAME" "$target_window"; then
+        echo "agent target not found: $target_window"
+        control_audit "PLAN rejected; target missing: $target_window"
+        return 1
+    fi
+
+    if [[ -n "$prompt" ]]; then
+        command="/plan $prompt"
+    fi
+
+    if ! control_arm_plan_approval "$SESSION_NAME" "$target_window"; then
+        echo "failed to arm plan approval for $target_window"
+        control_audit "PLAN approval arm failed: $target_window"
+        return 1
+    fi
+
+    if ! control_send_plan_command "$SESSION_NAME" "$AUDIT_LOG" "$target_window" "$command"; then
+        control_disarm_plan_approval
+        return 1
+    fi
+
+    preview="$(control_preview "$command")"
+    echo "sent $preview to $target_window"
+}
+
 control_cancel_loop() {
     local loop_id="$1"
     local pid="${LOOP_PIDS[$loop_id]:-}"
@@ -379,6 +467,7 @@ control_print_help() {
     cat <<'EOF'
 Available commands:
   /permissions auto-review     Make Auto-review current for agent-1
+  /plan [prompt]               Send /plan to agent-1 with scoped auto-approval
   /loop <interval> <prompt>     Schedule a prompt for agent-1. Intervals: 30s, 15m, 1h, 1d
   /loops                        List active loops
   /loops cancel <id>            Cancel a loop
@@ -418,6 +507,11 @@ control_handle_command() {
             ;;
         /permissions*)
             echo "usage: /permissions auto-review"
+            ;;
+        /plan|/plan\ *|$'/plan\t'*)
+            rest="${line#/plan}"
+            rest="$(control_ltrim "$rest")"
+            control_start_plan "$rest"
             ;;
         /loop*)
             if parsed="$(control_parse_loop_command "$line")"; then

@@ -126,6 +126,7 @@ The `control` window accepts slash commands while continuing to show the audit l
 
 ```bash
 /loop 1h Continue experiments and push best submission
+/plan Draft the implementation plan before coding
 ```
 
 Available commands:
@@ -133,13 +134,14 @@ Available commands:
 | Command | Action |
 |---|---|
 | `/permissions auto-review` | Open Codex `/permissions`, make Auto-review current for `agent-1`, then return to chat |
+| `/plan [prompt]` | Send Codex `/plan` to `agent-1`; plan approval is auto-confirmed only for this control-pane command |
 | `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled |
 | `/loops` | List active loops |
 | `/loops cancel <id>` | Cancel one loop |
 | `/help` | Show command help |
 
 Intervals are whole numbers with `s`, `m`, `h`, or `d`, for example `30s`, `15m`, `1h`, or `1d`.
-`/loop` is disabled in worktree mode because agent windows run `codex exec` and may exit.
+`/plan` and `/loop` are disabled in worktree mode because agent windows run `codex exec` and may exit.
 
 ## Options
 

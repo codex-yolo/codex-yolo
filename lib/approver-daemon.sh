@@ -13,6 +13,7 @@ SESSION_NAME="${1:?Usage: approver-daemon.sh <session-name> [poll-interval] [aud
 POLL_INTERVAL="${2:-0.3}"
 AUDIT_LOG="${3:-$(log_dir)/codex-yolo-${SESSION_NAME}.log}"
 COOLDOWN_SECS=2
+PLAN_APPROVAL_TTL="${CODEX_YOLO_PLAN_APPROVAL_TTL:-120}"
 
 # Associative array tracking last-approval timestamp per pane
 declare -A LAST_APPROVED
@@ -72,7 +73,7 @@ detect_prompt() {
     fi
 
     # Secondary signal 1: Approval option text
-    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, continue|Yes, and don.t ask|Yes, proceed|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
+    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
         has_approval_option=1
     fi
 
@@ -100,6 +101,74 @@ detect_prompt() {
     fi
 
     return 1
+}
+
+detect_plan_prompt() {
+    local content="$1"
+
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 35)"
+
+    local has_plan=0 has_approval_option=0 has_context=0
+
+    if echo "$tail_content" | grep -qiE '(proposed plan|proceed with (this )?plan|implement (this )?plan|approve (this )?plan|plan mode|^ *plan:)'; then
+        has_plan=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*(❯[[:space:]]*)?(Yes, proceed|Proceed|Implement|Approve|Continue)([[:space:]]|$)'; then
+        has_approval_option=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*(No, and tell Codex|Go back|Cancel|Keep planning|Revise|.*do differently)'; then
+        has_context=1
+    fi
+
+    if (( has_plan && has_approval_option && has_context )); then
+        echo "plan"
+        return 0
+    fi
+
+    return 1
+}
+
+plan_approval_file() {
+    if [[ -n "${CODEX_YOLO_PLAN_APPROVAL_FILE:-}" ]]; then
+        printf '%s\n' "$CODEX_YOLO_PLAN_APPROVAL_FILE"
+        return 0
+    fi
+
+    [[ -n "${AUDIT_LOG:-}" ]] || return 1
+    printf '%s.plan-approval\n' "$AUDIT_LOG"
+}
+
+clear_plan_approval_marker() {
+    local marker
+    marker="$(plan_approval_file 2>/dev/null)" || return 0
+    rm -f "$marker" 2>/dev/null || true
+}
+
+plan_approval_marker_valid() {
+    local pane="$1"
+    local marker marker_pane marker_ts now ttl
+
+    marker="$(plan_approval_file)" || return 1
+    [[ -f "$marker" ]] || return 1
+
+    IFS=$'\t ' read -r marker_pane marker_ts _ < "$marker" || return 1
+    if [[ -z "$marker_pane" || ! "$marker_ts" =~ ^[0-9]+$ ]]; then
+        rm -f "$marker" 2>/dev/null || true
+        return 1
+    fi
+
+    ttl="$PLAN_APPROVAL_TTL"
+    [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=120
+    now="$(date +%s)"
+    if (( now - marker_ts > ttl )); then
+        rm -f "$marker" 2>/dev/null || true
+        return 1
+    fi
+
+    [[ "$marker_pane" == "$pane" ]]
 }
 
 # Detect if the slash command autocomplete picker is visible.
@@ -172,8 +241,20 @@ main_loop() {
                 continue
             fi
 
-            # Detect permission prompt
+            # Detect control-pane initiated plan approval prompts before generic
+            # prompts, so direct /plan use in an agent pane is not auto-approved.
             local pattern
+            if pattern="$(detect_plan_prompt "$content")"; then
+                if plan_approval_marker_valid "$pane"; then
+                    tmux send-keys -t "$pane" Enter 2>/dev/null || continue
+                    clear_plan_approval_marker
+                    LAST_APPROVED["$pane"]="$(date +%s)"
+                    audit "$pane" "plan-control"
+                fi
+                continue
+            fi
+
+            # Detect permission prompt
             if pattern="$(detect_prompt "$content")"; then
                 # Send Enter to confirm the pre-selected first option (always the approval option)
                 tmux send-keys -t "$pane" Enter 2>/dev/null || continue
