@@ -104,6 +104,9 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 
 source "$SCRIPT_DIR/lib/common.sh"
 
+# Source install-time runtime probes without running the installer.
+eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
@@ -2546,8 +2549,110 @@ assert_contains "log_warn: contains WARN" "$_out" "WARN"
 _out="$(log_error "error msg" 2>&1)"
 assert_contains "log_error: contains ERROR" "$_out" "ERROR"
 
+_write_test_executable() {
+    local path="$1"
+    shift
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' "$@"
+    } > "$path"
+    chmod +x "$path"
+}
+
+_test_install_helper_missing_codex_needs_install() {
+    local fake_path old_path result=1
+    fake_path="$(mktemp -d)"
+    old_path="$PATH"
+    PATH="$fake_path"
+
+    if codex_cli_needs_install; then
+        result=0
+    fi
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    return $result
+}
+
+_test_install_helper_runnable_codex_skips_install() {
+    local fake_path old_path result=1
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/codex" \
+        '[ "$1" = "--version" ] && exit 0' \
+        'exit 1'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+
+    if ! codex_cli_needs_install; then
+        result=0
+    fi
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    return $result
+}
+
+_test_install_helper_broken_codex_needs_install() {
+    local fake_path old_path result=1
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/codex" \
+        'echo "/usr/bin/env: '\''node'\'': No such file or directory" >&2' \
+        'exit 127'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+
+    if codex_cli_needs_install; then
+        result=0
+    fi
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    return $result
+}
+
+_test_install_helper_rejects_broken_node_npm() {
+    local fake_path old_path result=1
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/node" 'exit 127'
+    _write_test_executable "$fake_path/npm" 'exit 127'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+
+    if ! node_runtime_works && ! npm_runtime_works; then
+        result=0
+    fi
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    return $result
+}
+
+assert_ok "install helper: missing codex needs install" _test_install_helper_missing_codex_needs_install
+assert_ok "install helper: runnable codex skips install" _test_install_helper_runnable_codex_skips_install
+assert_ok "install helper: broken codex needs install" _test_install_helper_broken_codex_needs_install
+assert_ok "install helper: broken node/npm are not runnable" _test_install_helper_rejects_broken_node_npm
+
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
+
+_test_check_prereqs_rejects_broken_codex() {
+    local fake_path old_path rc
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/tmux" 'exit 0'
+    _write_test_executable "$fake_path/codex" \
+        'echo "/usr/bin/env: '\''node'\'': No such file or directory" >&2' \
+        'exit 127'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+
+    check_prereqs >/dev/null 2>&1
+    rc=$?
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    [[ "$rc" -ne 0 ]]
+}
+assert_ok "check_prereqs: rejects broken codex executable" _test_check_prereqs_rejects_broken_codex
 
 # log_dir — returns a writable directory
 _test_log_dir_returns_path() {

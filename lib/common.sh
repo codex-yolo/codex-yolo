@@ -33,6 +33,18 @@ CODEX_YOLO_FAKE_BWRAP_ENABLED="${CODEX_YOLO_FAKE_BWRAP_ENABLED:-0}"
 CODEX_YOLO_PERMISSION_PROFILE="${CODEX_YOLO_PERMISSION_PROFILE:-}"
 CODEX_YOLO_FULL_ACCESS_ALLOWED="${CODEX_YOLO_FULL_ACCESS_ALLOWED:-}"
 
+codex_yolo_command_works() {
+    local cmd="$1"
+    shift
+
+    command -v "$cmd" &>/dev/null || return 1
+    "$cmd" "$@" &>/dev/null
+}
+
+codex_yolo_codex_cli_works() {
+    codex_yolo_command_works codex --version
+}
+
 check_prereqs() {
     local missing=0
     if ! command -v tmux &>/dev/null; then
@@ -41,6 +53,9 @@ check_prereqs() {
     fi
     if ! command -v codex &>/dev/null; then
         log_error "codex (OpenAI Codex CLI) is not installed"
+        missing=1
+    elif ! codex_yolo_codex_cli_works; then
+        log_error "codex (OpenAI Codex CLI) is installed but cannot run; 'codex --version' failed. Re-run the codex-yolo installer or install Node.js and @openai/codex."
         missing=1
     fi
     return $missing

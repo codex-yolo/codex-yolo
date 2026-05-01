@@ -126,6 +126,31 @@ install_pkg() {
     fi
 }
 
+command_runnable() {
+    local cmd="$1"
+    shift
+
+    command -v "$cmd" &>/dev/null || return 1
+    "$cmd" "$@" &>/dev/null
+}
+
+node_runtime_works() {
+    command_runnable node --version
+}
+
+npm_runtime_works() {
+    command_runnable npm --version
+}
+
+codex_cli_works() {
+    command_runnable codex --version
+}
+
+codex_cli_needs_install() {
+    command -v codex &>/dev/null || return 0
+    ! codex_cli_works
+}
+
 # -------------------------------------------------------------------
 # Pre-flight checks
 # -------------------------------------------------------------------
@@ -178,10 +203,14 @@ if ! command -v tmux &>/dev/null; then
 fi
 
 # -------------------------------------------------------------------
-# Install Codex CLI if missing
+# Install Codex CLI if missing or unusable
 # -------------------------------------------------------------------
-if ! command -v codex &>/dev/null; then
-    info "Codex CLI is not installed — installing"
+if codex_cli_needs_install; then
+    if command -v codex &>/dev/null; then
+        warn "Codex CLI is installed but 'codex --version' failed — reinstalling"
+    else
+        info "Codex CLI is not installed — installing"
+    fi
     CODEX_INSTALLED=0
 
     _npm_global_install() {
@@ -198,24 +227,30 @@ if ! command -v codex &>/dev/null; then
     }
 
     _ensure_npm() {
-        if command -v npm &>/dev/null; then return 0; fi
-        info "npm is not installed — attempting to install Node.js"
+        if node_runtime_works && npm_runtime_works; then return 0; fi
+        if ! node_runtime_works; then
+            info "Node.js runtime is not available — attempting to install Node.js"
+        elif ! npm_runtime_works; then
+            info "npm is not available or not runnable — attempting to install npm"
+        fi
         if [[ "$IS_TERMUX" -eq 1 ]]; then
             pkg install -y nodejs
         else
             install_pkg nodejs
             # Some distros package npm separately
-            command -v npm &>/dev/null || install_pkg npm
+            npm_runtime_works || install_pkg npm
         fi
+        node_runtime_works && npm_runtime_works
     }
 
-    _ensure_npm
-    if command -v npm &>/dev/null; then
+    if _ensure_npm; then
         _npm_global_install @openai/codex && CODEX_INSTALLED=1
+    else
+        warn "Node.js/npm are not available or not runnable — cannot install Codex CLI with npm"
     fi
 
     # Verify codex actually works (some platforms install but fail at runtime)
-    if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
+    if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
         warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
         _npm_global_uninstall @openai/codex
         _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
@@ -234,10 +269,10 @@ if ! command -v codex &>/dev/null; then
             run_as_root apt-get install -y -o Dpkg::Options::="--force-overwrite" nodejs 2>/dev/null
             rm -f /tmp/nodesource_setup.sh
         fi
-        if command -v npm &>/dev/null; then
+        if node_runtime_works && npm_runtime_works; then
             _npm_global_install @openai/codex && CODEX_INSTALLED=1
             # Verify codex works after NodeSource install too
-            if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex --version &>/dev/null; then
+            if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
                 warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
                 _npm_global_uninstall @openai/codex
                 _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
@@ -249,9 +284,9 @@ if ! command -v codex &>/dev/null; then
         warn "Skipping NodeSource fallback because sudo/root package access is unavailable"
     fi
 
-    if ! command -v codex &>/dev/null; then
+    if ! codex_cli_works; then
         ARCH="$(uname -m)"
-        error "Codex CLI could not be installed (platform: $OS, arch: $ARCH). Install it manually: npm install -g @openai/codex"
+        error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Install Node.js/npm, then run: npm install -g @openai/codex"
     fi
 fi
 
