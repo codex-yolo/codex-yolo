@@ -37,6 +37,7 @@ codex_yolo_command_works() {
     local cmd="$1"
     shift
 
+    hash -r 2>/dev/null || true
     command -v "$cmd" &>/dev/null || return 1
     "$cmd" "$@" &>/dev/null
 }

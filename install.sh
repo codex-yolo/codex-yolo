@@ -18,10 +18,11 @@ DEFAULT_BIN_DIR="$HOME/.local/bin"
 REQUESTED_BIN_DIR="${CODEX_YOLO_BIN_DIR:-$DEFAULT_BIN_DIR}"
 BIN_DIR="$REQUESTED_BIN_DIR"
 NPM_PREFIX="${CODEX_YOLO_NPM_PREFIX:-$HOME/.local}"
+NPM_BIN_DIR="$NPM_PREFIX/bin"
 ORIGINAL_PATH="${PATH:-}"
 
 # Make user-prefix npm installs visible during this script, not just after it.
-export PATH="$BIN_DIR:$ORIGINAL_PATH"
+export PATH="$BIN_DIR:$NPM_BIN_DIR:$ORIGINAL_PATH"
 
 # Colors (disabled if not a terminal)
 if [[ -t 1 ]]; then
@@ -130,6 +131,7 @@ command_runnable() {
     local cmd="$1"
     shift
 
+    hash -r 2>/dev/null || true
     command -v "$cmd" &>/dev/null || return 1
     "$cmd" "$@" &>/dev/null
 }
@@ -149,6 +151,32 @@ codex_cli_works() {
 codex_cli_needs_install() {
     command -v codex &>/dev/null || return 0
     ! codex_cli_works
+}
+
+codex_cli_failure_summary() {
+    local path output
+    path="$(command -v codex 2>/dev/null || true)"
+    if [[ -z "$path" ]]; then
+        printf '%s\n' "codex was not found on PATH"
+        return 0
+    fi
+
+    if output="$(codex --version 2>&1)"; then
+        printf '%s\n' "codex works: $output"
+        return 0
+    fi
+
+    output="${output//$'\n'/; }"
+    [[ -n "$output" ]] || output="failed with no output"
+    printf '%s\n' "codex path: $path; codex --version: $output"
+}
+
+warn_codex_cli_failure() {
+    warn "$(codex_cli_failure_summary)"
+}
+
+git_install_dir() {
+    git -c "safe.directory=$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
 }
 
 # -------------------------------------------------------------------
@@ -214,16 +242,37 @@ if codex_cli_needs_install; then
     CODEX_INSTALLED=0
 
     _npm_global_install() {
-        local pkg="$1"
-        npm install -g "$pkg" 2>/dev/null && return 0
+        local pkg="$1" global_output="" prefix_output=""
+        if global_output="$(npm install -g "$pkg" 2>&1)"; then
+            printf '%s\n' "$global_output"
+            hash -r 2>/dev/null || true
+            return 0
+        fi
+
         mkdir -p "$NPM_PREFIX"
-        npm install -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null
+        if prefix_output="$(npm install -g --prefix "$NPM_PREFIX" "$pkg" 2>&1)"; then
+            printf '%s\n' "$prefix_output"
+            hash -r 2>/dev/null || true
+            return 0
+        fi
+
+        warn "npm install -g $pkg failed:"
+        printf '%s\n' "$global_output" >&2
+        warn "npm install -g --prefix $NPM_PREFIX $pkg failed:"
+        printf '%s\n' "$prefix_output" >&2
+        return 1
     }
 
     _npm_global_uninstall() {
         local pkg="$1"
         npm uninstall -g "$pkg" 2>/dev/null || true
         npm uninstall -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null || true
+        hash -r 2>/dev/null || true
+    }
+
+    _npm_uninstall_codex_variants() {
+        _npm_global_uninstall @openai/codex
+        _npm_global_uninstall @mmmbuto/codex-cli-termux
     }
 
     _ensure_npm() {
@@ -244,6 +293,7 @@ if codex_cli_needs_install; then
     }
 
     if _ensure_npm; then
+        _npm_uninstall_codex_variants
         _npm_global_install @openai/codex && CODEX_INSTALLED=1
     else
         warn "Node.js/npm are not available or not runnable — cannot install Codex CLI with npm"
@@ -252,6 +302,7 @@ if codex_cli_needs_install; then
     # Verify codex actually works (some platforms install but fail at runtime)
     if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
         warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
+        warn_codex_cli_failure
         _npm_global_uninstall @openai/codex
         _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
     fi
@@ -270,10 +321,12 @@ if codex_cli_needs_install; then
             rm -f /tmp/nodesource_setup.sh
         fi
         if node_runtime_works && npm_runtime_works; then
+            _npm_uninstall_codex_variants
             _npm_global_install @openai/codex && CODEX_INSTALLED=1
             # Verify codex works after NodeSource install too
             if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
                 warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
+                warn_codex_cli_failure
                 _npm_global_uninstall @openai/codex
                 _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
             fi
@@ -285,6 +338,7 @@ if codex_cli_needs_install; then
     fi
 
     if ! codex_cli_works; then
+        warn_codex_cli_failure
         ARCH="$(uname -m)"
         error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Install Node.js/npm, then run: npm install -g @openai/codex"
     fi
@@ -308,11 +362,11 @@ elif [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating existing installation in $INSTALL_DIR"
     UPDATE_OK=1
     UPDATE_OUTPUT=""
-    if ! UPDATE_OUTPUT="$(git -C "$INSTALL_DIR" fetch origin 2>&1)"; then
+    if ! UPDATE_OUTPUT="$(git_install_dir fetch origin 2>&1)"; then
         UPDATE_OK=0
         warn "Could not fetch the latest codex-yolo update:"
         printf '%s\n' "$UPDATE_OUTPUT" >&2
-    elif ! UPDATE_OUTPUT="$(git -C "$INSTALL_DIR" reset --hard origin/main 2>&1)"; then
+    elif ! UPDATE_OUTPUT="$(git_install_dir reset --hard origin/main 2>&1)"; then
         UPDATE_OK=0
         warn "Could not reset the existing codex-yolo checkout to origin/main:"
         printf '%s\n' "$UPDATE_OUTPUT" >&2

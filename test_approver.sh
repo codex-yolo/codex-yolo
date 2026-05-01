@@ -104,8 +104,8 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 
 source "$SCRIPT_DIR/lib/common.sh"
 
-# Source install-time runtime probes without running the installer.
-eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+# Source install-time helpers without running the installer.
+eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
@@ -2627,10 +2627,54 @@ _test_install_helper_rejects_broken_node_npm() {
     return $result
 }
 
+_test_install_helper_reports_broken_codex_path() {
+    local fake_path old_path output result=1
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/codex" \
+        'echo "/usr/bin/env: '\''node'\'': No such file or directory" >&2' \
+        'exit 127'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+
+    output="$(codex_cli_failure_summary)"
+    if [[ "$output" == *"codex path: $fake_path/codex"* ]] && \
+       [[ "$output" == *"node"* ]]; then
+        result=0
+    fi
+
+    PATH="$old_path"
+    rm -rf "$fake_path"
+    return $result
+}
+
+_test_install_helper_git_safe_directory() {
+    local fake_path fake_install args_file old_path output expected result=1
+    fake_path="$(mktemp -d)"
+    fake_install="$(mktemp -d)"
+    args_file="$(mktemp)"
+    _write_test_executable "$fake_path/git" \
+        'printf "%s\n" "$@" > "$GIT_ARGS_FILE"' \
+        'exit 0'
+    old_path="$PATH"
+    PATH="$fake_path:$old_path"
+    GIT_ARGS_FILE="$args_file" INSTALL_DIR="$fake_install" git_install_dir fetch origin
+
+    output="$(cat "$args_file")"
+    expected=$'-c\nsafe.directory='"$fake_install"$'\n-C\n'"$fake_install"$'\nfetch\norigin'
+    [[ "$output" == "$expected" ]] && result=0
+
+    PATH="$old_path"
+    rm -rf "$fake_path" "$fake_install"
+    rm -f "$args_file"
+    return $result
+}
+
 assert_ok "install helper: missing codex needs install" _test_install_helper_missing_codex_needs_install
 assert_ok "install helper: runnable codex skips install" _test_install_helper_runnable_codex_skips_install
 assert_ok "install helper: broken codex needs install" _test_install_helper_broken_codex_needs_install
 assert_ok "install helper: broken node/npm are not runnable" _test_install_helper_rejects_broken_node_npm
+assert_ok "install helper: reports broken codex path" _test_install_helper_reports_broken_codex_path
+assert_ok "install helper: git uses safe.directory" _test_install_helper_git_safe_directory
 
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
