@@ -360,9 +360,119 @@ configure_codex_sandbox() {
     esac
 }
 
-# Ensure the Codex CLI config directory and config.toml exist.
+codex_yolo_tui_status_line() {
+    printf '%s\n' 'status_line = ["model-with-reasoning", "current-dir", "total-output-tokens", "run-state", "context-remaining", "context-used", "codex-version", "used-tokens", "total-input-tokens", "task-progress"]'
+}
+
+codex_yolo_config_has_tui_table() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+
+    awk '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            line = trim(line)
+            if (line ~ /^\[[[:space:]]*tui[[:space:]]*\]$/) {
+                found = 1
+                exit
+            }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$config_file"
+}
+
+codex_yolo_config_has_tui_status_line() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+
+    awk '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            line = trim(line)
+
+            if (line ~ /^\[[[:space:]]*tui[[:space:]]*\]$/) {
+                in_tui = 1
+                next
+            }
+            if (line ~ /^\[/) {
+                in_tui = 0
+                next
+            }
+            if (in_tui && line ~ /^status_line[[:space:]]*=/) {
+                found = 1
+                exit
+            }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$config_file"
+}
+
+codex_yolo_configure_tui_status_line() {
+    local config_file="$1"
+    local status_line
+    status_line="$(codex_yolo_tui_status_line)"
+
+    if codex_yolo_config_has_tui_status_line "$config_file"; then
+        return 0
+    fi
+
+    if codex_yolo_config_has_tui_table "$config_file"; then
+        local tmp
+        tmp="$(mktemp "${TMPDIR:-/tmp}/codex-yolo-config.XXXXXX")" || return 1
+
+        if awk -v status_line="$status_line" '
+            function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+            {
+                raw = $0
+                line = $0
+                sub(/[[:space:]]+#.*$/, "", line)
+                line = trim(line)
+
+                if (!inserted && in_tui && line ~ /^\[/) {
+                    print status_line
+                    inserted = 1
+                    in_tui = 0
+                }
+
+                print raw
+
+                if (line ~ /^\[[[:space:]]*tui[[:space:]]*\]$/) {
+                    in_tui = 1
+                    next
+                }
+                if (line ~ /^\[/) {
+                    in_tui = 0
+                    next
+                }
+            }
+            END {
+                if (in_tui && !inserted) {
+                    print status_line
+                }
+            }
+        ' "$config_file" > "$tmp" && cp "$tmp" "$config_file"; then
+            rm -f "$tmp"
+        else
+            rm -f "$tmp"
+            return 1
+        fi
+    elif [[ -s "$config_file" ]]; then
+        printf '\n[tui]\n%s\n' "$status_line" >> "$config_file" || return 1
+    else
+        printf '[tui]\n%s\n' "$status_line" >> "$config_file" || return 1
+    fi
+
+    log_info "Configured Codex TUI status line: $config_file"
+}
+
+# Ensure the Codex CLI config directory, config.toml, and codex-yolo defaults exist.
 # Does NOT override approval_policy (the daemon handles prompts at the terminal level).
-# This just ensures the config directory is present so Codex doesn't error on first run.
 ensure_codex_config() {
     local config_dir="$HOME/.codex"
     local config_file="$config_dir/config.toml"
@@ -383,4 +493,6 @@ ensure_codex_config() {
 TOML
         log_info "Created minimal Codex config: $config_file"
     fi
+
+    codex_yolo_configure_tui_status_line "$config_file"
 }

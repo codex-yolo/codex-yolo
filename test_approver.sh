@@ -2404,6 +2404,20 @@ _test_config_creates_toml() {
     return $result
 }
 
+_test_config_creates_tui_status_line() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+
+    local result content
+    content="$(cat "$fake_home/.codex/config.toml")"
+    result=1
+    [[ "$content" == *"[tui]"* ]] && \
+    [[ "$content" == *"$(codex_yolo_tui_status_line)"* ]] && result=0
+    rm -rf "$fake_home"
+    return $result
+}
+
 _test_config_idempotent() {
     local fake_home
     fake_home="$(mktemp -d)"
@@ -2411,16 +2425,16 @@ _test_config_idempotent() {
     echo 'approval_policy = "on-request"' > "$fake_home/.codex/config.toml"
 
     local before after
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
     before="$(cat "$fake_home/.codex/config.toml")"
     HOME="$fake_home" ensure_codex_config 2>/dev/null
     after="$(cat "$fake_home/.codex/config.toml")"
     rm -rf "$fake_home"
 
-    # Should not have modified existing config
     [[ "$before" == "$after" ]]
 }
 
-_test_config_preserves_existing() {
+_test_config_appends_tui_status_line_to_existing_config() {
     local fake_home
     fake_home="$(mktemp -d)"
     mkdir -p "$fake_home/.codex"
@@ -2437,13 +2451,65 @@ EOF
     rm -rf "$fake_home"
 
     [[ "$result" == *"approval_policy"* ]] && \
-    [[ "$result" == *"model"* ]]
+    [[ "$result" == *"model"* ]] && \
+    [[ "$result" == *"[tui]"* ]] && \
+    [[ "$result" == *"$(codex_yolo_tui_status_line)"* ]]
+}
+
+_test_config_inserts_status_line_into_existing_tui() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+model = "o4-mini"
+
+[tui]
+show_raw_agent_reasoning = true
+
+[profiles.fast]
+model = "gpt-5.4-mini"
+EOF
+
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+
+    local config_file result tui_count
+    config_file="$fake_home/.codex/config.toml"
+    tui_count="$(grep -c '^\[tui\]$' "$config_file" || true)"
+    result=1
+    if [[ "$tui_count" == "1" ]] && codex_yolo_config_has_tui_status_line "$config_file"; then
+        result=0
+    fi
+    rm -rf "$fake_home"
+    return $result
+}
+
+_test_config_preserves_existing_status_line() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+approval_policy = "on-request"
+
+[tui]
+status_line = ["current-dir"]
+EOF
+
+    local before after
+    before="$(cat "$fake_home/.codex/config.toml")"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    after="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+
+    [[ "$before" == "$after" ]]
 }
 
 assert_ok "ensure_codex_config: creates .codex directory" _test_config_creates_dir
 assert_ok "ensure_codex_config: creates config.toml" _test_config_creates_toml
-assert_ok "ensure_codex_config: idempotent (no overwrite)" _test_config_idempotent
-assert_ok "ensure_codex_config: preserves existing config" _test_config_preserves_existing
+assert_ok "ensure_codex_config: creates TUI status line" _test_config_creates_tui_status_line
+assert_ok "ensure_codex_config: idempotent after configuring TUI" _test_config_idempotent
+assert_ok "ensure_codex_config: appends TUI status line to existing config" _test_config_appends_tui_status_line_to_existing_config
+assert_ok "ensure_codex_config: inserts status line into existing TUI table" _test_config_inserts_status_line_into_existing_tui
+assert_ok "ensure_codex_config: preserves existing TUI status line" _test_config_preserves_existing_status_line
 
 ###############################################################################
 #                         AUDIT FUNCTION                                      #
