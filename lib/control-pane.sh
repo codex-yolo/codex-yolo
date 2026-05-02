@@ -11,6 +11,7 @@ declare -A LOOP_INTERVALS=()
 declare -A LOOP_SECONDS=()
 declare -A LOOP_PROMPTS=()
 declare -A LOOP_TARGETS=()
+declare -A LOOP_TYPES=()
 NEXT_LOOP_ID=1
 TAIL_PID=""
 CONTROL_SUBMIT_DELAY="${CODEX_YOLO_CONTROL_SUBMIT_DELAY:-0.2}"
@@ -129,6 +130,11 @@ control_collect_plan_prompt() {
     fi
 
     printf '%s' "$prompt"
+}
+
+control_is_plan_command() {
+    local command="$1"
+    [[ "$command" == "/plan" || "$command" == "/plan "* || "$command" == $'/plan\t'* ]]
 }
 
 control_agent_exists() {
@@ -359,13 +365,70 @@ control_send_prompt() {
     return 1
 }
 
+control_send_plan_command() {
+    local session="$1" audit_log="$2" target_window="$3" command="$4"
+    local audit_prefix="${5:-PLAN}"
+    local target="${session}:${target_window}"
+    local preview
+
+    if tmux send-keys -t "$target" -l "$command" 2>/dev/null; then
+        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+        tmux send-keys -t "$target" Enter 2>/dev/null || {
+            echo "failed to submit /plan to $target_window"
+            AUDIT_LOG="$audit_log" control_audit "$audit_prefix submit failed: $target_window"
+            return 1
+        }
+
+        preview="$(control_preview "$command")"
+        AUDIT_LOG="$audit_log" control_audit "$audit_prefix sent to $target_window: $preview"
+        return 0
+    fi
+
+    echo "failed to send /plan to $target_window"
+    AUDIT_LOG="$audit_log" control_audit "$audit_prefix send failed: $target_window"
+    return 1
+}
+
+control_send_plan_with_approval() {
+    local session="$1" audit_log="$2" target_window="$3" command="$4"
+    local audit_prefix="${5:-PLAN}"
+
+    if ! control_agent_exists "$session" "$target_window"; then
+        echo "agent target not found: $target_window"
+        AUDIT_LOG="$audit_log" control_audit "$audit_prefix target missing: $target_window"
+        return 1
+    fi
+
+    if ! AUDIT_LOG="$audit_log" control_arm_plan_approval "$session" "$target_window"; then
+        echo "failed to arm plan approval for $target_window"
+        AUDIT_LOG="$audit_log" control_audit "$audit_prefix approval arm failed: $target_window"
+        return 1
+    fi
+
+    if ! control_send_plan_command "$session" "$audit_log" "$target_window" "$command" "$audit_prefix"; then
+        AUDIT_LOG="$audit_log" control_disarm_plan_approval
+        return 1
+    fi
+
+    return 0
+}
+
+control_send_loop_plan() {
+    local session="$1" audit_log="$2" target_window="$3" command="$4" loop_id="${5:-manual}"
+    control_send_plan_with_approval "$session" "$audit_log" "$target_window" "$command" "LOOP #$loop_id plan"
+}
+
 control_loop_worker() {
-    local session="$1" audit_log="$2" loop_id="$3" seconds="$4" interval="$5" target_window="$6" prompt="$7"
+    local session="$1" audit_log="$2" loop_id="$3" seconds="$4" interval="$5" target_window="$6" prompt="$7" loop_type="${8:-prompt}"
 
     AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id worker started: every $interval to $target_window"
 
     while tmux has-session -t "$session" 2>/dev/null; do
-        control_send_prompt "$session" "$audit_log" "$target_window" "$prompt" "$loop_id" >/dev/null || true
+        if [[ "$loop_type" == "plan" ]]; then
+            control_send_loop_plan "$session" "$audit_log" "$target_window" "$prompt" "$loop_id" >/dev/null || true
+        else
+            control_send_prompt "$session" "$audit_log" "$target_window" "$prompt" "$loop_id" >/dev/null || true
+        fi
         sleep "$seconds" || break
     done
 
@@ -375,7 +438,7 @@ control_loop_worker() {
 control_start_loop() {
     local interval="$1" seconds="$2" prompt="$3"
     local target_window="agent-1"
-    local loop_id pid preview
+    local loop_id pid preview loop_type="prompt"
 
     if [[ "$SESSION_MODE" == "worktree" ]]; then
         echo "/loop is disabled in worktree mode because agent windows run codex exec and may exit."
@@ -389,10 +452,14 @@ control_start_loop() {
         return 1
     fi
 
+    if control_is_plan_command "$prompt"; then
+        loop_type="plan"
+    fi
+
     loop_id="$NEXT_LOOP_ID"
     NEXT_LOOP_ID=$((NEXT_LOOP_ID + 1))
 
-    control_loop_worker "$SESSION_NAME" "$AUDIT_LOG" "$loop_id" "$seconds" "$interval" "$target_window" "$prompt" &
+    control_loop_worker "$SESSION_NAME" "$AUDIT_LOG" "$loop_id" "$seconds" "$interval" "$target_window" "$prompt" "$loop_type" &
     pid=$!
 
     LOOP_PIDS["$loop_id"]="$pid"
@@ -400,33 +467,15 @@ control_start_loop() {
     LOOP_SECONDS["$loop_id"]="$seconds"
     LOOP_PROMPTS["$loop_id"]="$prompt"
     LOOP_TARGETS["$loop_id"]="$target_window"
+    LOOP_TYPES["$loop_id"]="$loop_type"
 
     preview="$(control_preview "$prompt")"
     echo "scheduled loop #$loop_id every $interval to $target_window: $preview"
-    control_audit "LOOP #$loop_id scheduled: every $interval to $target_window: $preview"
-}
-
-control_send_plan_command() {
-    local session="$1" audit_log="$2" target_window="$3" command="$4"
-    local target="${session}:${target_window}"
-    local preview
-
-    if tmux send-keys -t "$target" -l "$command" 2>/dev/null; then
-        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
-        tmux send-keys -t "$target" Enter 2>/dev/null || {
-            echo "failed to submit /plan to $target_window"
-            AUDIT_LOG="$audit_log" control_audit "PLAN submit failed: $target_window"
-            return 1
-        }
-
-        preview="$(control_preview "$command")"
-        AUDIT_LOG="$audit_log" control_audit "PLAN sent to $target_window: $preview"
-        return 0
+    if [[ "$loop_type" == "plan" ]]; then
+        control_audit "LOOP #$loop_id scheduled (plan): every $interval to $target_window: $preview"
+    else
+        control_audit "LOOP #$loop_id scheduled: every $interval to $target_window: $preview"
     fi
-
-    echo "failed to send /plan to $target_window"
-    AUDIT_LOG="$audit_log" control_audit "PLAN send failed: $target_window"
-    return 1
 }
 
 control_start_plan() {
@@ -451,14 +500,7 @@ control_start_plan() {
         command="/plan $prompt"
     fi
 
-    if ! control_arm_plan_approval "$SESSION_NAME" "$target_window"; then
-        echo "failed to arm plan approval for $target_window"
-        control_audit "PLAN approval arm failed: $target_window"
-        return 1
-    fi
-
-    if ! control_send_plan_command "$SESSION_NAME" "$AUDIT_LOG" "$target_window" "$command"; then
-        control_disarm_plan_approval
+    if ! control_send_plan_with_approval "$SESSION_NAME" "$AUDIT_LOG" "$target_window" "$command" "PLAN"; then
         return 1
     fi
 
@@ -483,6 +525,7 @@ control_cancel_loop() {
     unset "LOOP_SECONDS[$loop_id]"
     unset "LOOP_PROMPTS[$loop_id]"
     unset "LOOP_TARGETS[$loop_id]"
+    unset "LOOP_TYPES[$loop_id]"
 
     echo "canceled loop #$loop_id"
     control_audit "LOOP #$loop_id canceled"
@@ -501,6 +544,7 @@ control_list_loops() {
             unset "LOOP_SECONDS[$id]"
             unset "LOOP_PROMPTS[$id]"
             unset "LOOP_TARGETS[$id]"
+            unset "LOOP_TYPES[$id]"
             continue
         fi
 
@@ -520,6 +564,8 @@ Available commands:
   /permissions auto-review     Make Auto-review current for agent-1
   /plan [prompt]               Send /plan to agent-1 with scoped auto-approval
   /loop <interval> <prompt>     Schedule a prompt for agent-1. Intervals: 30s, 15m, 1h, 1d
+  /loop <interval> /plan <prompt>
+                                Schedule /plan with scoped auto-approval
   /loops                        List active loops
   /loops cancel <id>            Cancel a loop
   /help                         Show this help

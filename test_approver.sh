@@ -1263,6 +1263,19 @@ _test_control_parse_loop_preserves_prompt_spacing() {
 }
 assert_ok "control_parse_loop_command: trims separator spaces" _test_control_parse_loop_preserves_prompt_spacing
 
+_test_control_parse_loop_plan_command() {
+    local parsed
+    parsed="$(control_parse_loop_command "/loop 1h /plan Draft the next implementation plan")" || return 1
+    [[ "$parsed" == $'1h\t3600\t/plan Draft the next implementation plan' ]]
+}
+assert_ok "control_parse_loop_command: parses looped /plan command" _test_control_parse_loop_plan_command
+
+assert_ok "control_is_plan_command: detects /plan with prompt" \
+    control_is_plan_command "/plan Draft the next implementation plan"
+
+assert_fail "control_is_plan_command: rejects non-plan slash prefix" \
+    control_is_plan_command "/planner Draft the next implementation plan"
+
 assert_fail "control_parse_loop_command: rejects missing prompt" \
     control_parse_loop_command "/loop 1h"
 
@@ -1648,7 +1661,7 @@ _CONTROL_AUDIT="/tmp/codex-yolo-control-pane-test-$$.log"
 
 _control_cleanup() {
     tmux kill-session -t "$_CONTROL_SESSION" 2>/dev/null || true
-    rm -f "$_CONTROL_AUDIT" 2>/dev/null || true
+    rm -f "$_CONTROL_AUDIT" "${_CONTROL_AUDIT}.plan-approval" 2>/dev/null || true
 }
 
 _control_start_read_agent() {
@@ -2005,6 +2018,126 @@ _test_control_plan_removes_marker_on_send_failure() {
 }
 assert_ok "control-pane: /plan removes marker on send failure" _test_control_plan_removes_marker_on_send_failure
 
+_test_control_loop_plan_sends_prompt_and_marker() {
+    (
+        local calls audit marker log audit_log marker_content
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_send_loop_plan "sess" "$audit" "agent-1" "/plan loop plan" 3 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        marker_content="$(cat "$marker")"
+        rm -f "$calls" "$audit" "$marker"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /plan loop plan"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$marker_content" == %7$'\t'* ]] && \
+        [[ "$audit_log" == *"LOOP #3 plan sent to agent-1: /plan loop plan"* ]]
+    )
+}
+assert_ok "control-pane: looped /plan sends prompt and marker" _test_control_loop_plan_sends_prompt_and_marker
+
+_test_control_loop_plan_removes_marker_on_send_failure() {
+    (
+        local calls audit marker rc
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    return 1
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_send_loop_plan "sess" "$audit" "agent-1" "/plan will fail" 4 >/dev/null
+        rc=$?
+
+        rm -f "$calls" "$audit"
+        [[ "$rc" != "0" ]] && [[ ! -f "$marker" ]]
+    )
+}
+assert_ok "control-pane: looped /plan removes marker on send failure" _test_control_loop_plan_removes_marker_on_send_failure
+
+_test_control_loop_worker_plan_rearms_each_iteration() {
+    (
+        local calls audit marker counter log audit_log send_count arm_count marker_content
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+        counter="$(mktemp)"
+        printf '0' > "$counter"
+
+        tmux() {
+            local count
+            case "$1" in
+                has-session)
+                    count="$(cat "$counter")"
+                    if (( count < 2 )); then
+                        printf '%s' "$((count + 1))" > "$counter"
+                        return 0
+                    fi
+                    return 1
+                    ;;
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%s\n' "$*" >> "$calls"
+                    printf '%%7\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_loop_worker "sess" "$audit" "8" "0" "0s" "agent-1" "/plan repeat plan" "plan"
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        marker_content="$(cat "$marker")"
+        send_count="$(printf '%s\n' "$log" | grep -c -- "send-keys -t sess:agent-1 -l /plan repeat plan" 2>/dev/null || true)"
+        arm_count="$(printf '%s\n' "$log" | grep -c -- "display-message -p -t sess:agent-1" 2>/dev/null || true)"
+        rm -f "$calls" "$audit" "$marker" "$counter"
+
+        [[ "$send_count" == "2" ]] && \
+        [[ "$arm_count" == "2" ]] && \
+        [[ "$marker_content" == %7$'\t'* ]] && \
+        [[ "$audit_log" == *"LOOP #8 worker stopped"* ]]
+    )
+}
+assert_ok "control-pane: looped /plan rearms marker each iteration" _test_control_loop_worker_plan_rearms_each_iteration
+
 _test_control_plan_rejects_worktree_mode() {
     (
         local calls audit
@@ -2086,6 +2219,7 @@ _test_control_loop_dispatches_immediately() {
     LOOP_SECONDS=()
     LOOP_PROMPTS=()
     LOOP_TARGETS=()
+    LOOP_TYPES=()
     NEXT_LOOP_ID=1
 
     local old_delay="$CONTROL_SUBMIT_DELAY"
@@ -2132,6 +2266,30 @@ _test_control_loop_dispatches_prompt() {
     [[ "$capture" == *"READ:loop dispatch test"* ]]
 }
 assert_ok "control-pane: /loop dispatches on interval" _test_control_loop_dispatches_prompt
+
+_test_control_loop_dispatches_plan_prompt() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+
+    {
+        printf '/loop 2s /plan loop plan dispatch test\n'
+        sleep 0.5
+        printf '/loops cancel 1\n'
+    } | CODEX_YOLO_CONTROL_SUBMIT_DELAY=0.05 timeout 4 bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" standard >/dev/null 2>&1 || true
+
+    local capture marker_content
+    capture="$(tmux capture-pane -pt "$_CONTROL_SESSION:agent-1" -S -100 2>/dev/null)"
+    marker_content="$(cat "${_CONTROL_AUDIT}.plan-approval" 2>/dev/null || true)"
+    _control_cleanup
+    [[ "$capture" == *"READ:/plan loop plan dispatch test"* ]] && \
+    [[ "$marker_content" == %* ]]
+}
+assert_ok "control-pane: /loop dispatches /plan with approval marker" _test_control_loop_dispatches_plan_prompt
 
 _control_cleanup
 

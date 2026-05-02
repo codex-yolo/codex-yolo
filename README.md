@@ -126,6 +126,7 @@ The `control` window accepts slash commands while continuing to show the audit l
 
 ```bash
 /loop 1h Continue experiments and push best submission
+/loop 1h /plan Draft the next implementation plan
 /plan Draft the implementation plan before coding
 ```
 
@@ -135,7 +136,7 @@ Available commands:
 |---|---|
 | `/permissions auto-review` | Open Codex `/permissions`, make Auto-review current for `agent-1`, then return to chat |
 | `/plan [prompt]` | Send Codex `/plan` to `agent-1`; pasted multiline prompts are supported and plan approval is auto-confirmed only for this control-pane command |
-| `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled |
+| `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled; if `<prompt>` starts with `/plan`, each iteration uses scoped plan auto-approval |
 | `/loops` | List active loops |
 | `/loops cancel <id>` | Cancel one loop |
 | `/help` | Show command help |
@@ -143,6 +144,7 @@ Available commands:
 Intervals are whole numbers with `s`, `m`, `h`, or `d`, for example `30s`, `15m`, `1h`, or `1d`.
 `/plan` and `/loop` are disabled in worktree mode because agent windows run `codex exec` and may exit.
 When pasting a multiline `/plan` command into the interactive control pane, lines pasted immediately after the first `/plan` line are sent as part of the same plan prompt.
+Scheduled `/loop <interval> /plan <prompt>` commands use the same scoped plan approval marker as direct control-pane `/plan` commands on every iteration.
 
 ## Options
 
