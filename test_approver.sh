@@ -244,6 +244,16 @@ make_plan_implement_prompt() {
 EOF
 }
 
+make_plan_current_codex_implement_prompt() {
+    cat <<'EOF'
+  Implement this plan?
+
+  › 1. Yes, implement this plan          Switch to Default and start coding.
+    2. Yes, clear context and implement  Fresh thread. Context: 62% used.
+    3. No, stay in Plan mode             Continue planning with the model.
+EOF
+}
+
 make_plan_choice_prompt() {
     cat <<'EOF'
   Question 1/1 (1 unanswered)
@@ -291,6 +301,18 @@ make_plan_research_refresh_choice_prompt() {
     2. New experiment                  Prioritize implementing one promising candidate even if research notes are less complete.
     3. Submission ops                  Focus on monitoring pending work and preparing the next safe submission path.
     4. None of the above               Optionally, add details in notes (tab).
+EOF
+}
+
+make_plan_current_codex_choice_prompt() {
+    cat <<'EOF'
+  Question 1/1 (1 unanswered)
+  What do you want to do with the NeuroGolf 2026 competition?
+
+  › 1. Build solver plan (Recommended)  Plan a local/Kaggle pipeline to generate ONNX submissions for the competition.
+    2. Explain competition              Summarize the task, scoring, submissions, and practical strategy.
+    3. Set up repo                      Plan project scaffolding, dependencies, data access, and first validation run.
+    4. None of the above                Optionally, add details in notes (tab).
 EOF
 }
 
@@ -704,6 +726,9 @@ assert_ok "Plan approval: detects proceed-with-plan prompt in POSIX locale" \
 assert_ok "Plan approval: detects numbered implement-this-plan prompt" \
     detect_plan_prompt "$(make_plan_implement_prompt)"
 
+assert_ok "Plan approval: detects current Codex implement prompt marker" \
+    detect_plan_prompt "$(make_plan_current_codex_implement_prompt)"
+
 assert_ok "Plan approval: detects numbered Solution plan question" \
     detect_plan_choice_prompt "$(make_plan_choice_prompt)"
 
@@ -718,6 +743,9 @@ assert_ok "Plan approval: detects numbered Prepare only submission question" \
 
 assert_ok "Plan approval: detects numbered Research refresh question" \
     detect_plan_choice_prompt "$(make_plan_research_refresh_choice_prompt)"
+
+assert_ok "Plan approval: detects current Codex selected-option marker" \
+    detect_plan_choice_prompt "$(make_plan_current_codex_choice_prompt)"
 
 assert_fail "Plan approval: normal planning text is not a prompt" \
     detect_plan_prompt "$(cat <<'PANE'
@@ -1338,6 +1366,28 @@ PANE
 }
 assert_ok "control_collect_plan_prompt: leaves piped input line-by-line" _test_control_plan_does_not_collect_non_tty_by_default
 
+_test_control_loop_command_collects_pasted_prompt() {
+    (
+        local captured expected
+        CODEX_YOLO_CONTROL_PLAN_PASTE=1
+        CONTROL_PLAN_PASTE_GRACE=0.01
+
+        control_start_loop() {
+            printf '%s\t%s\t%s' "$1" "$2" "$3"
+        }
+
+        captured="$(control_handle_command "/loop 1h /plan https://example.com/competition" <<'PANE'
+### Continue previous work
+### Use Playwright
+Good luck!
+PANE
+)"
+        expected=$'1h\t3600\t/plan https://example.com/competition\n### Continue previous work\n### Use Playwright\nGood luck!'
+        [[ "$captured" == "$expected" ]]
+    )
+}
+assert_ok "control-pane: /loop command collects pasted multiline prompt" _test_control_loop_command_collects_pasted_prompt
+
 section "control-pane — Permissions Auto-review"
 
 _permissions_page_current="$(cat <<'PANE'
@@ -1957,10 +2007,11 @@ assert_ok "control-pane: /plan sends prompt and marker" _test_control_plan_sends
 
 _test_control_plan_sends_multiline_prompt() {
     (
-        local calls audit marker log
+        local calls audit marker payload log expected_payload
         calls="$(mktemp)"
         audit="$(mktemp)"
         marker="${audit}.plan-approval"
+        payload="$(mktemp)"
 
         tmux() {
             case "$1" in
@@ -1969,6 +2020,13 @@ _test_control_plan_sends_multiline_prompt() {
                     ;;
                 display-message)
                     printf '%%7\n'
+                    ;;
+                load-buffer)
+                    printf '%s\n' "$*" >> "$calls"
+                    cat > "$payload"
+                    ;;
+                paste-buffer)
+                    printf '%s\n' "$*" >> "$calls"
                     ;;
                 send-keys)
                     printf '%s\n' "$*" >> "$calls"
@@ -1980,12 +2038,17 @@ _test_control_plan_sends_multiline_prompt() {
         AUDIT_LOG="$audit"
         SESSION_MODE="standard"
         CONTROL_SUBMIT_DELAY=0
+        CONTROL_MULTILINE_PASTE_DELAY=0
         control_start_plan $'first line\nsecond line\n\nfourth line' >/dev/null || exit 1
 
         log="$(cat "$calls")"
-        rm -f "$calls" "$audit" "$marker"
+        expected_payload=$'/plan first line\nsecond line\n\nfourth line'
+        [[ "$(cat "$payload")" == "$expected_payload" ]] || exit 1
+        rm -f "$calls" "$audit" "$marker" "$payload"
 
-        [[ "$log" == *$'send-keys -t sess:agent-1 -l /plan first line\nsecond line\n\nfourth line'* ]] && \
+        [[ "$log" == *"load-buffer -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"paste-buffer -dpr -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"-t sess:agent-1"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
     )
 }
@@ -1993,10 +2056,11 @@ assert_ok "control-pane: /plan sends multiline prompt" _test_control_plan_sends_
 
 _test_control_plan_command_collects_unterminated_paste() {
     (
-        local calls audit marker log url continuation expected
+        local calls audit marker payload log url continuation expected
         calls="$(mktemp)"
         audit="$(mktemp)"
         marker="${audit}.plan-approval"
+        payload="$(mktemp)"
 
         tmux() {
             case "$1" in
@@ -2005,6 +2069,13 @@ _test_control_plan_command_collects_unterminated_paste() {
                     ;;
                 display-message)
                     printf '%%7\n'
+                    ;;
+                load-buffer)
+                    printf '%s\n' "$*" >> "$calls"
+                    cat > "$payload"
+                    ;;
+                paste-buffer)
+                    printf '%s\n' "$*" >> "$calls"
                     ;;
                 send-keys)
                     printf '%s\n' "$*" >> "$calls"
@@ -2018,16 +2089,20 @@ _test_control_plan_command_collects_unterminated_paste() {
         CODEX_YOLO_CONTROL_PLAN_PASTE=1
         CONTROL_PLAN_PASTE_GRACE=0.01
         CONTROL_SUBMIT_DELAY=0
+        CONTROL_MULTILINE_PASTE_DELAY=0
 
         url="https://example.com/projects/arc-task"
         continuation=$'### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
         control_handle_command "/plan $url" < <(printf '%s' "$continuation") >/dev/null || exit 1
 
         log="$(cat "$calls")"
-        rm -f "$calls" "$audit" "$marker"
+        expected=$'/plan '"$url"$'\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
+        [[ "$(cat "$payload")" == "$expected" ]] || exit 1
+        rm -f "$calls" "$audit" "$marker" "$payload"
 
-        expected=$'send-keys -t sess:agent-1 -l /plan '"$url"$'\n### Inspect the web reference\n### Review the local archive contents\nImprove your best submission, submit the best local submission for this task'
-        [[ "$log" == *"$expected"* ]] && \
+        [[ "$log" == *"load-buffer -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"paste-buffer -dpr -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"-t sess:agent-1"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
     )
 }

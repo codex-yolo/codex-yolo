@@ -22,6 +22,7 @@ CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_A
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
 CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS="${CODEX_YOLO_CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS:-6}"
 CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.5}"
+CONTROL_MULTILINE_PASTE_DELAY="${CODEX_YOLO_CONTROL_MULTILINE_PASTE_DELAY:-0.8}"
 
 control_audit() {
     local msg="$1"
@@ -133,6 +134,10 @@ control_collect_plan_prompt() {
     printf '%s' "$prompt"
 }
 
+control_collect_loop_prompt() {
+    control_collect_plan_prompt "$1"
+}
+
 control_is_plan_command() {
     local command="$1"
     [[ "$command" == "/plan" || "$command" == "/plan "* || "$command" == $'/plan\t'* ]]
@@ -141,6 +146,36 @@ control_is_plan_command() {
 control_agent_exists() {
     local session="$1" target_window="$2"
     tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -Fxq "$target_window"
+}
+
+control_send_text_to_target() {
+    local target="$1" text="$2"
+    local buffer
+
+    if [[ "$text" != *$'\n'* ]]; then
+        tmux send-keys -t "$target" -l "$text" 2>/dev/null
+        return
+    fi
+
+    buffer="codex-yolo-paste-$$-$RANDOM"
+    if ! printf '%s' "$text" | tmux load-buffer -b "$buffer" - 2>/dev/null; then
+        return 1
+    fi
+
+    if ! tmux paste-buffer -dpr -b "$buffer" -t "$target" 2>/dev/null; then
+        tmux delete-buffer -b "$buffer" 2>/dev/null || true
+        return 1
+    fi
+}
+
+control_delay_after_text_send() {
+    local text="$1"
+
+    if [[ "$text" == *$'\n'* ]]; then
+        sleep "$CONTROL_MULTILINE_PASTE_DELAY" 2>/dev/null || true
+    else
+        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+    fi
 }
 
 control_permissions_page_visible() {
@@ -383,10 +418,10 @@ control_send_prompt() {
         return 1
     fi
 
-    if tmux send-keys -t "$target" -l "$prompt" 2>/dev/null; then
+    if control_send_text_to_target "$target" "$prompt"; then
         # Codex's TUI can classify a burst of text plus immediate Enter as paste
         # input. A short pause makes the Enter arrive as a submit key.
-        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+        control_delay_after_text_send "$prompt"
         tmux send-keys -t "$target" Enter 2>/dev/null || {
             echo "failed to submit prompt to $target_window"
             AUDIT_LOG="$audit_log" control_audit "LOOP #$loop_id submit failed: $target_window"
@@ -408,8 +443,8 @@ control_send_plan_command() {
     local target="${session}:${target_window}"
     local preview
 
-    if tmux send-keys -t "$target" -l "$command" 2>/dev/null; then
-        sleep "$CONTROL_SUBMIT_DELAY" 2>/dev/null || true
+    if control_send_text_to_target "$target" "$command"; then
+        control_delay_after_text_send "$command"
         tmux send-keys -t "$target" Enter 2>/dev/null || {
             echo "failed to submit /plan to $target_window"
             AUDIT_LOG="$audit_log" control_audit "$audit_prefix submit failed: $target_window"
@@ -654,6 +689,7 @@ control_handle_command() {
                 rest="${parsed#*$'\t'}"
                 seconds="${rest%%$'\t'*}"
                 prompt="${rest#*$'\t'}"
+                prompt="$(control_collect_loop_prompt "$prompt")"
                 control_start_loop "$interval" "$seconds" "$prompt"
             else
                 echo "usage: /loop <interval> <prompt>"
