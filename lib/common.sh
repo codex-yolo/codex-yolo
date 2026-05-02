@@ -263,7 +263,10 @@ configure_codex_permissions() {
 
     case "$policy" in
         auto|"")
-            if codex_yolo_full_access_allowed; then
+            if (( ${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0} )) && codex_yolo_running_in_container; then
+                CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+                log_info "Codex permissions default: Auto-review (container without Codex sandbox)"
+            elif codex_yolo_full_access_allowed; then
                 CODEX_YOLO_PERMISSION_PROFILE="full-access"
                 log_info "Codex permissions default: Full Access"
             else

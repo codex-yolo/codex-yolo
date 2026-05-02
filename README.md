@@ -181,7 +181,9 @@ failures instead.
 
 For Codex `/permissions`, `codex-yolo` defaults to Full Access when the active
 Codex requirements allow it. If Full Access is disabled by requirements, it uses
-Auto-review (`codex-auto-review`). Override this with `--permissions
+Auto-review (`codex-auto-review`). In containers where the Codex sandbox is
+unavailable and codex-yolo has to rely on external isolation, the `auto` default
+also uses Auto-review. Override this with `--permissions
 full-access`, `--permissions auto-review`, or `--permissions none`. For
 standard interactive Auto-review sessions, `codex-yolo` also reconciles the TUI
 once at startup so `/permissions` shows `Auto-review (current)`.

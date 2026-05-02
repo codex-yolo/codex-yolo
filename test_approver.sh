@@ -1379,6 +1379,60 @@ assert_fail "permissions busy: ignores unrelated task progress text" \
 assert_ok "permissions startup: detects Codex TUI readiness" \
     control_codex_tui_visible "OpenAI Codex"$'\n'"model: gpt-5.5 /model to change"
 
+assert_ok "permissions startup: detects first-run welcome gate" \
+    control_codex_welcome_continue_visible "Welcome to Codex"$'\n'"Press enter to continue"
+
+_test_control_welcome_ignores_stale_scrollback() {
+    local content
+    content="$(cat <<'PANE'
+Welcome to Codex
+Press enter to continue
+
+old scrollback line 1
+old scrollback line 2
+old scrollback line 3
+old scrollback line 4
+old scrollback line 5
+old scrollback line 6
+old scrollback line 7
+old scrollback line 8
+old scrollback line 9
+old scrollback line 10
+old scrollback line 11
+old scrollback line 12
+old scrollback line 13
+old scrollback line 14
+old scrollback line 15
+old scrollback line 16
+old scrollback line 17
+old scrollback line 18
+old scrollback line 19
+old scrollback line 20
+old scrollback line 21
+old scrollback line 22
+old scrollback line 23
+old scrollback line 24
+old scrollback line 25
+old scrollback line 26
+old scrollback line 27
+old scrollback line 28
+old scrollback line 29
+old scrollback line 30
+╭──────────────────────────────────────────────╮
+│ >_ OpenAI Codex                              │
+│ model:     gpt-5.5   fast   /model to change │
+╰──────────────────────────────────────────────╯
+
+› Improve documentation in @filename
+
+  Ready
+PANE
+)"
+
+    ! control_codex_welcome_continue_visible "$content"
+}
+assert_ok "permissions startup: ignores stale welcome scrollback" _test_control_welcome_ignores_stale_scrollback
+
 _test_control_permissions_select_auto_review_keys() {
     (
         local calls log
@@ -1624,6 +1678,57 @@ PANE
     )
 }
 assert_ok "permissions startup: waits until permissions page is visible" _test_control_permissions_startup_waits_until_ready
+
+_test_control_permissions_startup_continues_welcome_before_permissions() {
+    (
+        local calls audit counter log audit_log captures
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        counter="$(mktemp)"
+        printf '0' > "$counter"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    captures="$(cat "$counter")"
+                    captures=$((captures + 1))
+                    printf '%s' "$captures" > "$counter"
+                    if (( captures == 1 )); then
+                        printf 'Welcome to Codex\nPress enter to continue\n'
+                    else
+                        cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+                    fi
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit" "$counter"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Up Up Up Down Enter"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup continuing welcome: agent-1 attempt=1"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
+    )
+}
+assert_ok "permissions startup: continues welcome before selecting Auto-review" _test_control_permissions_startup_continues_welcome_before_permissions
 
 _test_control_permissions_startup_retries_busy() {
     (
@@ -2339,6 +2444,7 @@ section "configure_codex_permissions — Permission profile defaults"
 _test_configure_permissions_full_access_allowed() {
     CODEX_YOLO_FULL_ACCESS_ALLOWED=1
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || return 1
 
@@ -2347,12 +2453,34 @@ _test_configure_permissions_full_access_allowed() {
 
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+    return $result
+}
+
+_test_configure_permissions_container_without_sandbox_uses_auto_review() {
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=1
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
+    CODEX_YOLO_CONTAINER_DETECTED=1
+    CODEX_YOLO_PERMISSION_PROFILE=""
+
+    configure_codex_permissions auto >/dev/null 2>&1 || return 1
+
+    local result=1
+    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]] && \
+    codex_yolo_should_reconcile_auto_review 0 1 "" && \
+    result=0
+
+    CODEX_YOLO_FULL_ACCESS_ALLOWED=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+    CODEX_YOLO_CONTAINER_DETECTED=""
+    CODEX_YOLO_PERMISSION_PROFILE=""
     return $result
 }
 
 _test_configure_permissions_full_access_disabled() {
     CODEX_YOLO_FULL_ACCESS_ALLOWED=0
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || return 1
 
@@ -2361,6 +2489,7 @@ _test_configure_permissions_full_access_disabled() {
 
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
     return $result
 }
 
@@ -2445,6 +2574,7 @@ _test_permission_config_arg() {
 }
 
 assert_ok "configure_codex_permissions: uses Full Access when allowed" _test_configure_permissions_full_access_allowed
+assert_ok "configure_codex_permissions: uses Auto-review in containers without Codex sandbox" _test_configure_permissions_container_without_sandbox_uses_auto_review
 assert_ok "configure_codex_permissions: uses Auto-review when Full Access disabled" _test_configure_permissions_full_access_disabled
 assert_ok "configure_codex_permissions: accepts auto-review alias" _test_configure_permissions_auto_review_alias
 assert_ok "codex_yolo_full_access_allowed: honors requirements cache" _test_full_access_disabled_by_requirements_cache

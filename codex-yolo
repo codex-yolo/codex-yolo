@@ -156,8 +156,8 @@ main() {
 
     # Ensure Codex CLI config directory exists
     ensure_codex_config
-    configure_codex_permissions "$codex_permissions_policy" || exit 1
     configure_codex_sandbox "$codex_sandbox_policy" || exit 1
+    configure_codex_permissions "$codex_permissions_policy" || exit 1
 
     # ── worktree setup ───────────────────────────────────────────────────────
     if (( worktree_mode )); then

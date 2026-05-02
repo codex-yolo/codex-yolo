@@ -197,6 +197,13 @@ control_codex_tui_visible() {
     [[ "$content" == *"model:"*" /model to change"* ]]
 }
 
+control_codex_welcome_continue_visible() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 30)"
+    [[ "$tail_content" == *"Welcome to Codex"* && "$tail_content" == *"Press enter to continue"* ]]
+}
+
 control_capture_target() {
     local target="$1"
     tmux capture-pane -p -t "$target" -S -100 2>/dev/null
@@ -328,6 +335,17 @@ control_wait_set_auto_review() {
 
     for (( attempt=1; attempt<=attempts; attempt++ )); do
         content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+
+        if control_codex_welcome_continue_visible "$content"; then
+            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup continuing welcome: $target_window attempt=$attempt"
+            tmux send-keys -t "$target" Enter 2>/dev/null || {
+                echo "failed to continue Codex welcome on $target_window"
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup welcome continue failed: $target_window"
+                return 1
+            }
+            sleep "$delay" 2>/dev/null || true
+            continue
+        fi
 
         if control_permissions_page_visible "$content" || control_codex_tui_visible "$content"; then
             AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup ready: $target_window attempt=$attempt"
