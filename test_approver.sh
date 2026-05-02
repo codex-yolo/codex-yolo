@@ -1432,6 +1432,31 @@ assert_ok "permissions startup: detects Codex TUI readiness" \
 assert_ok "permissions startup: detects first-run welcome gate" \
     control_codex_welcome_continue_visible "Welcome to Codex"$'\n'"Press enter to continue"
 
+_codex_sign_in_prompt="$(cat <<'PANE'
+Welcome to Codex, OpenAI's command-line coding agent
+
+Sign in with ChatGPT to use Codex as part of your paid plan
+or connect an API key for usage-based billing
+
+> 1. Sign in with ChatGPT
+     Usage included with Plus, Pro, Business, and Enterprise plans
+
+  2. Sign in with Device Code
+     Sign in from another device with a one-time code
+
+  3. Provide your own API key
+     Pay for what you use
+
+Press enter to continue
+PANE
+)"
+
+assert_ok "permissions startup: detects Codex sign-in chooser" \
+    control_codex_sign_in_visible "$_codex_sign_in_prompt"
+
+assert_fail "permissions startup: does not continue sign-in chooser" \
+    control_codex_welcome_continue_visible "$_codex_sign_in_prompt"
+
 _test_control_welcome_ignores_stale_scrollback() {
     local content
     content="$(cat <<'PANE'
@@ -1779,6 +1804,55 @@ PANE
     )
 }
 assert_ok "permissions startup: continues welcome before selecting Auto-review" _test_control_permissions_startup_continues_welcome_before_permissions
+
+_test_control_permissions_startup_leaves_sign_in_for_user() {
+    (
+        local calls audit log audit_log
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    cat <<'PANE'
+Welcome to Codex, OpenAI's command-line coding agent
+
+Sign in with ChatGPT to use Codex as part of your paid plan
+or connect an API key for usage-based billing
+
+> 1. Sign in with ChatGPT
+     Usage included with Plus, Pro, Business, and Enterprise plans
+
+  2. Sign in with Device Code
+     Sign in from another device with a one-time code
+
+  3. Provide your own API key
+     Pay for what you use
+
+Press enter to continue
+PANE
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        rm -f "$calls" "$audit"
+
+        [[ -z "$log" ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup sign-in required: agent-1 attempt=1"* ]] && \
+        [[ "$audit_log" != *"PERMISSIONS auto-review startup continuing welcome"* ]]
+    )
+}
+assert_ok "permissions startup: leaves sign-in chooser for user" _test_control_permissions_startup_leaves_sign_in_for_user
 
 _test_control_permissions_startup_retries_busy() {
     (

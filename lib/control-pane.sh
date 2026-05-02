@@ -232,11 +232,20 @@ control_codex_tui_visible() {
     [[ "$content" == *"model:"*" /model to change"* ]]
 }
 
+control_codex_sign_in_visible() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 30)"
+    [[ "$tail_content" == *"Sign in with ChatGPT"* && "$tail_content" == *"Provide your own API key"* ]] || \
+    [[ "$tail_content" == *"Sign in with Device Code"* && "$tail_content" == *"Provide your own API key"* ]]
+}
+
 control_codex_welcome_continue_visible() {
     local content="$1"
     local tail_content
     tail_content="$(echo "$content" | tail -n 30)"
-    [[ "$tail_content" == *"Welcome to Codex"* && "$tail_content" == *"Press enter to continue"* ]]
+    [[ "$tail_content" == *"Welcome to Codex"* && "$tail_content" == *"Press enter to continue"* ]] || return 1
+    ! control_codex_sign_in_visible "$tail_content"
 }
 
 control_capture_target() {
@@ -370,6 +379,12 @@ control_wait_set_auto_review() {
 
     for (( attempt=1; attempt<=attempts; attempt++ )); do
         content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+
+        if control_codex_sign_in_visible "$content"; then
+            echo "Codex sign-in required on $target_window; leaving pane for manual sign-in"
+            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup sign-in required: $target_window attempt=$attempt"
+            return 0
+        fi
 
         if control_codex_welcome_continue_visible "$content"; then
             AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup continuing welcome: $target_window attempt=$attempt"
