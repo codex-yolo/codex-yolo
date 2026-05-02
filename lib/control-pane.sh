@@ -18,7 +18,7 @@ CONTROL_SUBMIT_DELAY="${CODEX_YOLO_CONTROL_SUBMIT_DELAY:-0.2}"
 CONTROL_PERMISSIONS_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_DELAY:-0.5}"
 CONTROL_PERMISSIONS_OPEN_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_OPEN_ATTEMPTS:-10}"
 CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETRY_DELAY:-2}"
-CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
+CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-1200}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
 CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS="${CODEX_YOLO_CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS:-6}"
 CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.5}"
@@ -367,7 +367,7 @@ control_wait_set_auto_review() {
     local attempts="${4:-$CONTROL_PERMISSIONS_STARTUP_ATTEMPTS}"
     local delay="${5:-$CONTROL_PERMISSIONS_STARTUP_DELAY}"
     local target="${session}:${target_window}"
-    local attempt content rc
+    local attempt content rc sign_in_logged=0
 
     if ! control_agent_exists "$session" "$target_window"; then
         echo "agent target not found: $target_window"
@@ -381,9 +381,13 @@ control_wait_set_auto_review() {
         content="$(control_capture_target "$target" 2>/dev/null)" || content=""
 
         if control_codex_sign_in_visible "$content"; then
-            echo "Codex sign-in required on $target_window; leaving pane for manual sign-in"
-            AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup sign-in required: $target_window attempt=$attempt"
-            return 0
+            if (( ! sign_in_logged )); then
+                echo "Codex sign-in required on $target_window; waiting for manual sign-in"
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup sign-in required: $target_window attempt=$attempt"
+                sign_in_logged=1
+            fi
+            sleep "$delay" 2>/dev/null || true
+            continue
         fi
 
         if control_codex_welcome_continue_visible "$content"; then

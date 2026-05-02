@@ -1805,9 +1805,9 @@ PANE
 }
 assert_ok "permissions startup: continues welcome before selecting Auto-review" _test_control_permissions_startup_continues_welcome_before_permissions
 
-_test_control_permissions_startup_leaves_sign_in_for_user() {
+_test_control_permissions_startup_waits_at_sign_in_without_keys() {
     (
-        local calls audit log audit_log
+        local calls audit log audit_log rc
         calls="$(mktemp)"
         audit="$(mktemp)"
 
@@ -1841,18 +1841,111 @@ PANE
             esac
         }
 
-        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null || exit 1
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 3 0 >/dev/null
+        rc=$?
 
         log="$(cat "$calls")"
         audit_log="$(cat "$audit")"
         rm -f "$calls" "$audit"
 
+        [[ "$rc" == "1" ]] && \
         [[ -z "$log" ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review startup sign-in required: agent-1 attempt=1"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup timed out: agent-1"* ]] && \
         [[ "$audit_log" != *"PERMISSIONS auto-review startup continuing welcome"* ]]
     )
 }
-assert_ok "permissions startup: leaves sign-in chooser for user" _test_control_permissions_startup_leaves_sign_in_for_user
+assert_ok "permissions startup: waits at sign-in chooser without keys" _test_control_permissions_startup_waits_at_sign_in_without_keys
+
+_test_control_permissions_startup_resumes_after_manual_sign_in() {
+    (
+        local calls audit captures permissions_opened log audit_log capture_count command_count
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        captures="$(mktemp)"
+        permissions_opened="$(mktemp)"
+        printf '0' > "$captures"
+        printf '0' > "$permissions_opened"
+
+        tmux() {
+            local count opened
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                capture-pane)
+                    opened="$(cat "$permissions_opened")"
+                    if (( opened > 0 )); then
+                        cat <<'PANE'
+Update Model Permissions
+
+  Default (current)
+  Auto-review
+  Full Access (disabled)
+PANE
+                        return
+                    fi
+
+                    count="$(cat "$captures")"
+                    count=$((count + 1))
+                    printf '%s' "$count" > "$captures"
+                    case "$count" in
+                        1)
+                            cat <<'PANE'
+Welcome to Codex, OpenAI's command-line coding agent
+
+> 1. Sign in with ChatGPT
+  2. Sign in with Device Code
+  3. Provide your own API key
+PANE
+                            ;;
+                        2)
+                            printf 'Complete device-code sign-in in your browser\n'
+                            ;;
+                        3)
+                            cat <<'PANE'
+Welcome to Codex, OpenAI's command-line coding agent
+
+_ Signed in with your ChatGPT account
+
+Press enter to continue
+PANE
+                            ;;
+                        *)
+                            printf 'OpenAI Codex\nmodel: gpt-5.5 /model to change\n'
+                            ;;
+                    esac
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    if [[ "$*" == *"-l /permissions"* ]]; then
+                        printf '1' > "$permissions_opened"
+                    fi
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_PERMISSIONS_DELAY=0
+        control_wait_set_auto_review "sess" "$audit" "agent-1" 8 0 >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        audit_log="$(cat "$audit")"
+        capture_count="$(cat "$captures")"
+        command_count="$(grep -c -- "-l /permissions" "$calls" 2>/dev/null || true)"
+        rm -f "$calls" "$audit" "$captures" "$permissions_opened"
+
+        [[ "$capture_count" == "5" ]] && \
+        [[ "$command_count" == "1" ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Up Up Up Down Enter"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup sign-in required: agent-1 attempt=1"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review startup continuing welcome: agent-1 attempt=3"* ]] && \
+        [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
+    )
+}
+assert_ok "permissions startup: resumes after manual sign-in" _test_control_permissions_startup_resumes_after_manual_sign_in
 
 _test_control_permissions_startup_retries_busy() {
     (
