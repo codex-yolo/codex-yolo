@@ -147,7 +147,7 @@ detect_plan_choice_prompt() {
         has_recommended_choice=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(What do you want me to do|execution plan|submitting a new candidate|reference link|submission slot|link|task)'; then
+    if echo "$tail_content" | grep -qiE '(What do you want me to (do|plan around)|execution plan|submitting a new candidate|reference link|submission slot|link|task)'; then
         has_context=1
     fi
 

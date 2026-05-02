@@ -253,6 +253,20 @@ make_plan_choice_prompt() {
 EOF
 }
 
+make_plan_around_choice_prompt() {
+    cat <<'EOF'
+  I can see this is a project with external data, evaluation rules, and a few plausible implementation paths.
+
+  Question 1/1 (1 unanswered)
+  What do you want me to plan around this project?
+
+  _ 1. Implementation strategy (Recommended)  Plan a practical approach for building, testing, and iterating a strong solution.
+    2. Starter workflow                    Plan code structure for a baseline and local workflow.
+    3. Explain requirements                Summarize the task, expected outputs, and scoring implications.
+    4. None of the above                   Optionally, add details in notes (tab).
+EOF
+}
+
 make_plan_submission_choice_prompt() {
     cat <<'EOF'
   Question 1/1 (1 unanswered)
@@ -692,6 +706,9 @@ assert_ok "Plan approval: detects numbered implement-this-plan prompt" \
 
 assert_ok "Plan approval: detects numbered Solution plan question" \
     detect_plan_choice_prompt "$(make_plan_choice_prompt)"
+
+assert_ok "Plan approval: detects plan-around recommended question" \
+    detect_plan_choice_prompt "$(make_plan_around_choice_prompt)"
 
 assert_ok "Plan approval: detects selected Solution plan question in POSIX locale" \
     _test_plan_choice_selection_marker_posix_locale
@@ -1362,6 +1379,30 @@ assert_fail "permissions busy: ignores unrelated task progress text" \
 assert_ok "permissions startup: detects Codex TUI readiness" \
     control_codex_tui_visible "OpenAI Codex"$'\n'"model: gpt-5.5 /model to change"
 
+_test_control_permissions_select_auto_review_keys() {
+    (
+        local calls log
+        calls="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS=3
+        control_permissions_select_auto_review "sess:agent-1" || exit 1
+
+        log="$(cat "$calls")"
+        rm -f "$calls"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Down Enter"* ]]
+    )
+}
+assert_ok "permissions command: selects Auto-review without Home key" _test_control_permissions_select_auto_review_keys
+
 _test_control_permissions_select_sequence() {
     (
         local calls audit log audit_log
@@ -1402,7 +1443,7 @@ PANE
 
         [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
-        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Up Up Up Down Enter"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Escape"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
     )
@@ -1444,7 +1485,7 @@ PANE
         rm -f "$calls" "$audit"
 
         [[ "$log" != *"-l /permissions"* ]] && \
-        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$log" != *"Down Enter"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Escape"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review already current: agent-1"* ]]
     )
@@ -1483,7 +1524,7 @@ _test_control_permissions_refuses_wrong_page() {
 
         [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
-        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$log" != *"Down Enter"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review page not visible: agent-1"* ]]
     )
 }
@@ -1526,7 +1567,7 @@ _test_control_permissions_busy_returns_retry() {
         [[ "$rc" == "2" ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 -l /permissions"* ]] && \
         [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
-        [[ "$log" != *"Home Down Enter"* ]] && \
+        [[ "$log" != *"Down Enter"* ]] && \
         [[ "$log" != *"Escape"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review busy: agent-1"* ]]
     )
@@ -1576,7 +1617,7 @@ PANE
         audit_log="$(cat "$audit")"
         rm -f "$calls" "$audit" "$counter"
 
-        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Up Up Up Down Enter"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review startup waiting: agent-1"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review startup ready: agent-1 attempt=2"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
@@ -1643,7 +1684,7 @@ PANE
         rm -f "$calls" "$audit" "$commands" "$busy"
 
         [[ "$command_count" == "2" ]] && \
-        [[ "$log" == *"send-keys -t sess:agent-1 Home Down Enter"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Up Up Up Up Up Up Down Enter"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review startup busy: agent-1 attempt=1"* ]] && \
         [[ "$audit_log" == *"PERMISSIONS auto-review selected: agent-1"* ]]
     )
@@ -3465,6 +3506,33 @@ _run_integ_plan_submission_choice_with_control_marker() {
     [[ "$result" == *'pattern="plan-choice-control"'* ]] && (( marker_kept ))
 }
 assert_ok "Integration: numbered Prepare only submission prompt approved only with control marker" _run_integ_plan_submission_choice_with_control_marker
+
+_run_integ_plan_around_choice_with_control_marker() {
+    _integ_cleanup
+    local audit_tmp marker pane result marker_kept
+    audit_tmp="$(mktemp)"
+    marker="${audit_tmp}.plan-approval"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+    pane="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    printf '%s\t%s\n' "$pane" "$(date +%s)" > "$marker"
+
+    tmux send-keys -t "$_INTEG_SESSION:test" "$(make_plan_around_choice_prompt)" ""
+    sleep 0.2
+
+    timeout 2 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    result="$(cat "$audit_tmp")"
+    marker_kept=0
+    [[ -f "$marker" ]] && marker_kept=1
+    rm -f "$audit_tmp" "$marker"
+    _integ_cleanup
+
+    [[ "$result" == *'pattern="plan-choice-control"'* ]] && (( marker_kept ))
+}
+assert_ok "Integration: plan-around prompt approved only with control marker" _run_integ_plan_around_choice_with_control_marker
 
 _run_integ_plan_without_control_marker() {
     _integ_cleanup

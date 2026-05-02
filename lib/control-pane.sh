@@ -20,6 +20,7 @@ CONTROL_PERMISSIONS_OPEN_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_OPEN_ATTEMPT
 CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETRY_DELAY:-2}"
 CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-240}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
+CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS="${CODEX_YOLO_CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS:-6}"
 CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.5}"
 
 control_audit() {
@@ -171,6 +172,24 @@ control_permissions_needs_auto_review() {
     control_permissions_auto_review_available "$content"
 }
 
+control_permissions_select_auto_review() {
+    local target="$1"
+    local reset_steps="$CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS"
+    local keys=()
+    local i
+
+    if [[ ! "$reset_steps" =~ ^[1-9][0-9]*$ ]]; then
+        reset_steps=6
+    fi
+
+    for (( i=0; i<reset_steps; i++ )); do
+        keys+=(Up)
+    done
+    keys+=(Down Enter)
+
+    tmux send-keys -t "$target" "${keys[@]}" 2>/dev/null
+}
+
 control_codex_tui_visible() {
     local content="$1"
     [[ "$content" == *"OpenAI Codex"* ]] || \
@@ -279,7 +298,7 @@ control_set_auto_review() {
         return 1
     fi
 
-    if ! tmux send-keys -t "$target" Home Down Enter 2>/dev/null; then
+    if ! control_permissions_select_auto_review "$target"; then
         echo "failed to select Auto-review on $target_window"
         AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review select failed: $target_window"
         return 1
