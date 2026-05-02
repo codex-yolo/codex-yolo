@@ -667,14 +667,34 @@ PANE
 
 section "detect_plan_prompt — scoped plan approval"
 
+_test_plan_prompt_posix_locale() {
+    LC_ALL=C detect_plan_prompt "$(make_plan_prompt)"
+}
+
+_test_plan_choice_selection_marker_posix_locale() {
+    LC_ALL=C detect_plan_choice_prompt "$(cat <<'PANE'
+  Question 1/1 (1 unanswered)
+  What do you want me to do with the project reference link?
+
+  ❯ 1. Solution plan (Recommended)  Produce a concrete engineering/research plan for building a submission.
+PANE
+)"
+}
+
 assert_ok "Plan approval: detects proceed-with-plan prompt" \
     detect_plan_prompt "$(make_plan_prompt)"
+
+assert_ok "Plan approval: detects proceed-with-plan prompt in POSIX locale" \
+    _test_plan_prompt_posix_locale
 
 assert_ok "Plan approval: detects numbered implement-this-plan prompt" \
     detect_plan_prompt "$(make_plan_implement_prompt)"
 
 assert_ok "Plan approval: detects numbered Solution plan question" \
     detect_plan_choice_prompt "$(make_plan_choice_prompt)"
+
+assert_ok "Plan approval: detects selected Solution plan question in POSIX locale" \
+    _test_plan_choice_selection_marker_posix_locale
 
 assert_ok "Plan approval: detects numbered Prepare only submission question" \
     detect_plan_choice_prompt "$(make_plan_submission_choice_prompt)"
@@ -797,6 +817,17 @@ assert_ok "Plan approval marker: accepts long-running control-pane plan" _test_p
 
 section "detect_slash_picker — positive detection"
 
+_test_slash_picker_posix_locale() {
+    LC_ALL=C detect_slash_picker "$(cat <<'PANE'
+  Some conversation text above...
+
+  ❯ /permissions    Set what Codex can do without asking first
+    /plan           Switch to plan mode and optionally send a prompt
+    /personality    Choose a communication style for responses
+PANE
+)"
+}
+
 # /p prefix: shows /plan, /permissions, /personality etc.
 assert_ok "Slash picker: /p prefix autocomplete" \
     detect_slash_picker "$(cat <<'PANE'
@@ -808,6 +839,9 @@ assert_ok "Slash picker: /p prefix autocomplete" \
     /personality    Choose a communication style for responses
 PANE
 )"
+
+assert_ok "Slash picker: /p prefix autocomplete in POSIX locale" \
+    _test_slash_picker_posix_locale
 
 # /c prefix: shows /compact, /changelog etc.
 assert_ok "Slash picker: /c prefix autocomplete" \
