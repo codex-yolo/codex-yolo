@@ -71,6 +71,18 @@ run_as_root() {
     fi
 }
 
+run_noninteractive_as_root() {
+    if [[ -n "$SUDO" ]]; then
+        sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC "$@"
+    else
+        DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC "$@"
+    fi
+}
+
+run_apt_get() {
+    run_noninteractive_as_root apt-get "$@"
+}
+
 choose_bin_dir() {
     local requested="$1"
     local fallback="$INSTALL_DIR/bin"
@@ -106,7 +118,7 @@ install_pkg() {
             pkg install -y "$pkg"
         elif command -v apt-get &>/dev/null; then
             require_system_pkg_install "$pkg"
-            run_as_root apt-get update && run_as_root apt-get install -y "$pkg"
+            run_apt_get update && run_apt_get install -y "$pkg"
         elif command -v dnf &>/dev/null; then
             require_system_pkg_install "$pkg"
             run_as_root dnf install -y "$pkg"
@@ -175,6 +187,74 @@ warn_codex_cli_failure() {
     warn "$(codex_cli_failure_summary)"
 }
 
+codex_release_asset_name() {
+    local os="$1" arch="$2"
+
+    case "$os:$arch" in
+        Linux*:x86_64|Linux*:amd64)
+            printf '%s\n' "codex-x86_64-unknown-linux-musl"
+            ;;
+        Linux*:aarch64|Linux*:arm64)
+            printf '%s\n' "codex-aarch64-unknown-linux-musl"
+            ;;
+        Darwin*:arm64|Darwin*:aarch64)
+            printf '%s\n' "codex-aarch64-apple-darwin"
+            ;;
+        Darwin*:x86_64|Darwin*:amd64)
+            printf '%s\n' "codex-x86_64-apple-darwin"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_codex_release_binary() {
+    local asset archive_url tmp_dir archive extracted
+
+    [[ "$IS_TERMUX" -eq 0 ]] || return 1
+    command -v curl &>/dev/null || return 1
+    command -v tar &>/dev/null || return 1
+
+    asset="$(codex_release_asset_name "$OS" "$(uname -m)")" || return 1
+    archive_url="https://github.com/openai/codex/releases/latest/download/${asset}.tar.gz"
+    tmp_dir="$(mktemp -d)" || return 1
+    archive="$tmp_dir/codex.tar.gz"
+    extracted="$tmp_dir/$asset"
+
+    if ! curl -fsSL --retry 2 "$archive_url" -o "$archive"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if [[ ! -f "$extracted" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! cp "$extracted" "$BIN_DIR/codex" || ! chmod +x "$BIN_DIR/codex"; then
+        rm -f "$BIN_DIR/codex"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    rm -rf "$tmp_dir"
+    hash -r 2>/dev/null || true
+
+    if codex_cli_works; then
+        return 0
+    fi
+
+    rm -f "$BIN_DIR/codex"
+    hash -r 2>/dev/null || true
+    return 1
+}
+
 git_install_dir() {
     git -c "safe.directory=$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
 }
@@ -231,120 +311,6 @@ if ! command -v tmux &>/dev/null; then
 fi
 
 # -------------------------------------------------------------------
-# Install Codex CLI if missing or unusable
-# -------------------------------------------------------------------
-if codex_cli_needs_install; then
-    if command -v codex &>/dev/null; then
-        warn "Codex CLI is installed but 'codex --version' failed — reinstalling"
-    else
-        info "Codex CLI is not installed — installing"
-    fi
-    CODEX_INSTALLED=0
-
-    _npm_global_install() {
-        local pkg="$1" global_output="" prefix_output=""
-        if global_output="$(npm install -g "$pkg" 2>&1)"; then
-            printf '%s\n' "$global_output"
-            hash -r 2>/dev/null || true
-            return 0
-        fi
-
-        mkdir -p "$NPM_PREFIX"
-        if prefix_output="$(npm install -g --prefix "$NPM_PREFIX" "$pkg" 2>&1)"; then
-            printf '%s\n' "$prefix_output"
-            hash -r 2>/dev/null || true
-            return 0
-        fi
-
-        warn "npm install -g $pkg failed:"
-        printf '%s\n' "$global_output" >&2
-        warn "npm install -g --prefix $NPM_PREFIX $pkg failed:"
-        printf '%s\n' "$prefix_output" >&2
-        return 1
-    }
-
-    _npm_global_uninstall() {
-        local pkg="$1"
-        npm uninstall -g "$pkg" 2>/dev/null || true
-        npm uninstall -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null || true
-        hash -r 2>/dev/null || true
-    }
-
-    _npm_uninstall_codex_variants() {
-        _npm_global_uninstall @openai/codex
-        _npm_global_uninstall @mmmbuto/codex-cli-termux
-    }
-
-    _ensure_npm() {
-        if node_runtime_works && npm_runtime_works; then return 0; fi
-        if ! node_runtime_works; then
-            info "Node.js runtime is not available — attempting to install Node.js"
-        elif ! npm_runtime_works; then
-            info "npm is not available or not runnable — attempting to install npm"
-        fi
-        if [[ "$IS_TERMUX" -eq 1 ]]; then
-            pkg install -y nodejs
-        else
-            install_pkg nodejs
-            # Some distros package npm separately
-            npm_runtime_works || install_pkg npm
-        fi
-        node_runtime_works && npm_runtime_works
-    }
-
-    if _ensure_npm; then
-        _npm_uninstall_codex_variants
-        _npm_global_install @openai/codex && CODEX_INSTALLED=1
-    else
-        warn "Node.js/npm are not available or not runnable — cannot install Codex CLI with npm"
-    fi
-
-    # Verify codex actually works (some platforms install but fail at runtime)
-    if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
-        warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
-        warn_codex_cli_failure
-        _npm_global_uninstall @openai/codex
-        _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
-    fi
-
-    # If distro Node.js failed (common on aarch64 with 64KB pages),
-    # try NodeSource v22 with proper Node.js
-    if [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null && [[ "$CAN_INSTALL_SYSTEM_PACKAGES" -eq 1 ]]; then
-        warn "npm install failed — trying with Node.js 22 via NodeSource"
-        # Remove conflicting distro Node.js packages before installing NodeSource
-        run_as_root apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
-        run_as_root apt-get autoremove -y 2>/dev/null || true
-        if curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh 2>/dev/null; then
-            run_as_root bash /tmp/nodesource_setup.sh 2>/dev/null
-            # Use --force-overwrite in case distro libnode-dev wasn't fully removed
-            run_as_root apt-get install -y -o Dpkg::Options::="--force-overwrite" nodejs 2>/dev/null
-            rm -f /tmp/nodesource_setup.sh
-        fi
-        if node_runtime_works && npm_runtime_works; then
-            _npm_uninstall_codex_variants
-            _npm_global_install @openai/codex && CODEX_INSTALLED=1
-            # Verify codex works after NodeSource install too
-            if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
-                warn "@openai/codex installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux"
-                warn_codex_cli_failure
-                _npm_global_uninstall @openai/codex
-                _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
-            fi
-        else
-            warn "npm is not available — cannot install Codex CLI"
-        fi
-    elif [[ "$CODEX_INSTALLED" -eq 0 ]] && command -v apt-get &>/dev/null; then
-        warn "Skipping NodeSource fallback because sudo/root package access is unavailable"
-    fi
-
-    if ! codex_cli_works; then
-        warn_codex_cli_failure
-        ARCH="$(uname -m)"
-        error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Install Node.js/npm, then run: npm install -g @openai/codex"
-    fi
-fi
-
-# -------------------------------------------------------------------
 # Install / update
 # -------------------------------------------------------------------
 if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
@@ -390,9 +356,146 @@ fi
 chmod +x "$INSTALL_DIR/codex-yolo"
 
 # -------------------------------------------------------------------
-# Symlink into PATH
+# Choose bin directory
 # -------------------------------------------------------------------
 BIN_DIR="$(choose_bin_dir "$REQUESTED_BIN_DIR")"
+export PATH="$BIN_DIR:$NPM_BIN_DIR:$ORIGINAL_PATH"
+
+# -------------------------------------------------------------------
+# Install Codex CLI if missing or unusable
+# -------------------------------------------------------------------
+if codex_cli_needs_install; then
+    if command -v codex &>/dev/null; then
+        warn "Codex CLI is installed but 'codex --version' failed — reinstalling"
+    else
+        info "Codex CLI is not installed — installing"
+    fi
+    CODEX_INSTALLED=0
+    CODEX_INSTALL_METHOD="${CODEX_YOLO_CODEX_INSTALL_METHOD:-auto}"
+
+    case "$CODEX_INSTALL_METHOD" in
+        auto|release|npm) ;;
+        *)
+            warn "Unknown CODEX_YOLO_CODEX_INSTALL_METHOD=$CODEX_INSTALL_METHOD — using auto"
+            CODEX_INSTALL_METHOD="auto"
+            ;;
+    esac
+
+    _npm_global_install() {
+        local pkg="$1" global_output="" prefix_output=""
+        if global_output="$(npm install -g "$pkg" 2>&1)"; then
+            printf '%s\n' "$global_output"
+            hash -r 2>/dev/null || true
+            return 0
+        fi
+
+        mkdir -p "$NPM_PREFIX"
+        if prefix_output="$(npm install -g --prefix "$NPM_PREFIX" "$pkg" 2>&1)"; then
+            printf '%s\n' "$prefix_output"
+            hash -r 2>/dev/null || true
+            return 0
+        fi
+
+        warn "npm install -g $pkg failed:"
+        printf '%s\n' "$global_output" >&2
+        warn "npm install -g --prefix $NPM_PREFIX $pkg failed:"
+        printf '%s\n' "$prefix_output" >&2
+        return 1
+    }
+
+    _npm_global_uninstall() {
+        local pkg="$1"
+        npm uninstall -g "$pkg" 2>/dev/null || true
+        npm uninstall -g --prefix "$NPM_PREFIX" "$pkg" 2>/dev/null || true
+        hash -r 2>/dev/null || true
+    }
+
+    _npm_uninstall_codex_variants() {
+        _npm_global_uninstall @openai/codex
+        _npm_global_uninstall @mmmbuto/codex-cli-termux
+    }
+
+    _install_nodesource_nodejs() {
+        command -v apt-get &>/dev/null || return 1
+        [[ "$CAN_INSTALL_SYSTEM_PACKAGES" -eq 1 ]] || return 1
+        command -v curl &>/dev/null || return 1
+
+        warn "Trying Node.js 22 via NodeSource"
+        run_apt_get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
+        run_apt_get autoremove -y 2>/dev/null || true
+        if curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh 2>/dev/null; then
+            run_noninteractive_as_root bash /tmp/nodesource_setup.sh 2>/dev/null
+            run_apt_get install -y -o Dpkg::Options::="--force-overwrite" nodejs 2>/dev/null
+            rm -f /tmp/nodesource_setup.sh
+        fi
+        node_runtime_works && npm_runtime_works
+    }
+
+    _ensure_npm() {
+        if node_runtime_works && npm_runtime_works; then return 0; fi
+        if ! node_runtime_works; then
+            info "Node.js runtime is not available — attempting to install Node.js"
+        elif ! npm_runtime_works; then
+            info "npm is not available or not runnable — attempting to install npm"
+        fi
+        if [[ "$IS_TERMUX" -eq 1 ]]; then
+            pkg install -y nodejs
+        elif command -v apt-get &>/dev/null; then
+            _install_nodesource_nodejs || {
+                warn "Skipping Ubuntu/Debian 'apt install npm' because it is large and slow. Set CODEX_YOLO_ALLOW_APT_NPM=1 to allow that fallback."
+                [[ "${CODEX_YOLO_ALLOW_APT_NPM:-0}" == "1" ]] || return 1
+                npm_runtime_works || install_pkg npm
+            }
+        else
+            node_runtime_works || install_pkg nodejs
+            npm_runtime_works || install_pkg npm
+        fi
+        node_runtime_works && npm_runtime_works
+    }
+
+    if [[ "$CODEX_INSTALL_METHOD" != "npm" ]]; then
+        info "Attempting Codex CLI standalone release install"
+        if install_codex_release_binary; then
+            CODEX_INSTALLED=1
+            info "Codex CLI installed from GitHub release"
+        elif [[ "$CODEX_INSTALL_METHOD" == "release" ]]; then
+            warn "Codex CLI release install failed"
+        else
+            warn "Codex CLI release install failed — falling back to npm"
+        fi
+    fi
+
+    if [[ "$CODEX_INSTALLED" -eq 0 && "$CODEX_INSTALL_METHOD" != "release" ]]; then
+        if _ensure_npm; then
+            _npm_uninstall_codex_variants
+            _npm_global_install @openai/codex && CODEX_INSTALLED=1
+        else
+            warn "Node.js/npm are not available or not runnable — cannot install Codex CLI with npm"
+        fi
+    fi
+
+    # Verify codex actually works (some platforms install but fail at runtime)
+    if [[ "$CODEX_INSTALLED" -eq 1 ]] && ! codex_cli_works; then
+        warn "Codex CLI installed but 'codex --version' failed — falling back to @mmmbuto/codex-cli-termux when npm is available"
+        warn_codex_cli_failure
+        if npm_runtime_works; then
+            _npm_global_uninstall @openai/codex
+            _npm_global_install @mmmbuto/codex-cli-termux && CODEX_INSTALLED=1 || CODEX_INSTALLED=0
+        else
+            CODEX_INSTALLED=0
+        fi
+    fi
+
+    if ! codex_cli_works; then
+        warn_codex_cli_failure
+        ARCH="$(uname -m)"
+        error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Try the standalone GitHub release or install Node.js/npm, then run: npm install -g @openai/codex"
+    fi
+fi
+
+# -------------------------------------------------------------------
+# Symlink into PATH
+# -------------------------------------------------------------------
 
 ln -sf "$INSTALL_DIR/codex-yolo" "$BIN_DIR/codex-yolo"
 info "Linked codex-yolo → $BIN_DIR/codex-yolo"

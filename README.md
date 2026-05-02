@@ -34,13 +34,13 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && export PATH="${CODEX_YOLO_BIN_DIR:-$HOME/.local/bin}:${CODEX_YOLO_HOME:-$HOME/.codex-yolo}/bin:$PATH"
 ```
 
-This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. If `~/.local/bin` is not writable, the installer falls back to `~/.codex-yolo/bin`; you can also set `CODEX_YOLO_BIN_DIR` to choose a writable bin directory. It also installs `git`, `tmux`, `curl`, and `codex` (Codex CLI via npm) if they are missing. Override the install location with `CODEX_YOLO_HOME`:
+This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. If `~/.local/bin` is not writable, the installer falls back to `~/.codex-yolo/bin`; you can also set `CODEX_YOLO_BIN_DIR` to choose a writable bin directory. It also installs `git`, `tmux`, `curl`, and `codex` if they are missing. Codex CLI is installed from the standalone GitHub release first, with npm as a fallback. Override the install location with `CODEX_YOLO_HOME`:
 
 ```bash
 CODEX_YOLO_HOME="$HOME/my/path"; command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | CODEX_YOLO_HOME="$CODEX_YOLO_HOME" bash && export PATH="${CODEX_YOLO_BIN_DIR:-$HOME/.local/bin}:$CODEX_YOLO_HOME/bin:$PATH"
 ```
 
-**Local install** (from a cloned repo, no network access needed):
+**Local install** (from a cloned repo; no network access needed if Codex CLI is already installed):
 
 ```bash
 git clone https://github.com/codex-yolo/codex-yolo.git ~/.codex-yolo
@@ -245,7 +245,7 @@ docs/
 ## Prerequisites
 
 - **tmux** (tested with 3.4)
-- **codex** (OpenAI Codex CLI — `npm install -g @openai/codex`)
+- **codex** (OpenAI Codex CLI — installed from the standalone GitHub release or `npm install -g @openai/codex`)
 - **git** 2.38+ (required for worktree mode — `git merge-tree --write-tree`)
 
 ## Testing

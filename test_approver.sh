@@ -105,7 +105,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source install-time helpers without running the installer.
-eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
@@ -2669,12 +2669,32 @@ _test_install_helper_git_safe_directory() {
     return $result
 }
 
+_test_install_helper_linux_x64_release_asset() {
+    [[ "$(codex_release_asset_name Linux x86_64)" == "codex-x86_64-unknown-linux-musl" ]]
+}
+
+_test_install_helper_linux_arm64_release_asset() {
+    [[ "$(codex_release_asset_name Linux aarch64)" == "codex-aarch64-unknown-linux-musl" ]]
+}
+
+_test_install_helper_macos_arm64_release_asset() {
+    [[ "$(codex_release_asset_name Darwin arm64)" == "codex-aarch64-apple-darwin" ]]
+}
+
+_test_install_helper_rejects_unknown_release_asset() {
+    ! codex_release_asset_name FreeBSD x86_64 >/dev/null
+}
+
 assert_ok "install helper: missing codex needs install" _test_install_helper_missing_codex_needs_install
 assert_ok "install helper: runnable codex skips install" _test_install_helper_runnable_codex_skips_install
 assert_ok "install helper: broken codex needs install" _test_install_helper_broken_codex_needs_install
 assert_ok "install helper: broken node/npm are not runnable" _test_install_helper_rejects_broken_node_npm
 assert_ok "install helper: reports broken codex path" _test_install_helper_reports_broken_codex_path
 assert_ok "install helper: git uses safe.directory" _test_install_helper_git_safe_directory
+assert_ok "install helper: Linux x64 release asset" _test_install_helper_linux_x64_release_asset
+assert_ok "install helper: Linux arm64 release asset" _test_install_helper_linux_arm64_release_asset
+assert_ok "install helper: macOS arm64 release asset" _test_install_helper_macos_arm64_release_asset
+assert_ok "install helper: unknown release asset rejected" _test_install_helper_rejects_unknown_release_asset
 
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
