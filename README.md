@@ -127,6 +127,8 @@ The `control` window accepts slash commands while continuing to show the audit l
 ```bash
 /loop 1h Continue experiments and push best submission
 /loop 1h /plan Draft the next implementation plan
+/loop 1h /queue ["/status", "/clear", "/plan Draft the next implementation plan"]
+/queue ["/status", "/clear", "Continue from the latest result"]
 /plan Draft the implementation plan before coding
 ```
 
@@ -136,15 +138,38 @@ Available commands:
 |---|---|
 | `/permissions auto-review` | Open Codex `/permissions`, make Auto-review current for `agent-1`, then return to chat |
 | `/plan [prompt]` | Send Codex `/plan` to `agent-1`; pasted multiline prompts are supported and plan approval is auto-confirmed only for this control-pane command |
+| `/queue ["item1", "item2"]` | Run prompts or slash commands sequentially on `agent-1`; each item waits for the previous item to finish |
+| `/queue add <id> ["item"]` | Append pending items to an active queue |
+| `/queue edit <id> <index> ["item"]` | Replace one pending queue item |
+| `/queue remove <id> <index-or-range>` | Remove pending queue item(s), for example `2` or `2-4` |
+| `/queue dequeue <id>` | Remove the next pending item; `/queue deque <id>` is also accepted |
+| `/queue show <id>` | Show numbered queue items |
+| `/queues` | List active queues |
+| `/queues cancel <id>` | Cancel one queue |
 | `/loop <interval> <prompt>` | Send `<prompt>` to `agent-1` immediately, then every interval until canceled; if `<prompt>` starts with `/plan`, each iteration uses scoped plan auto-approval |
+| `/loop <interval> /queue ["item1", "item2"]` | Run the full queue immediately, then repeat after each queue run completes and the interval elapses |
 | `/loops` | List active loops |
 | `/loops cancel <id>` | Cancel one loop |
 | `/help` | Show command help |
 
 Intervals are whole numbers with `s`, `m`, `h`, or `d`, for example `30s`, `15m`, `1h`, or `1d`.
-`/plan` and `/loop` are disabled in worktree mode because agent windows run `codex exec` and may exit.
+Queue item lists must be arrays of quoted strings. Use single quotes, double quotes, or triple quotes for multiline items:
+
+```bash
+/queue ['item1', 'item2', 'item3']
+/queue ["item1", "item2", "item3"]
+/queue ["""item1
+item1""", """item2
+item2"""]
+/queue ['''item1
+item1''', '''item2
+item2''']
+```
+
+`/plan`, `/queue`, and `/loop` are disabled in worktree mode because agent windows run `codex exec` and may exit.
 When pasting a multiline `/plan` command into the interactive control pane, lines pasted immediately after the first `/plan` line are sent as part of the same plan prompt.
 Scheduled `/loop <interval> /plan <prompt>` commands use the same scoped plan approval marker as direct control-pane `/plan` commands on every iteration.
+Scheduled `/loop <interval> /queue [...]` commands wait for each queued item to complete before sending the next item, and they do not start the next loop iteration until the previous queue run has finished.
 
 ## Options
 

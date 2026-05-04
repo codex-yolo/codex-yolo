@@ -108,7 +108,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -313,6 +313,20 @@ make_plan_current_codex_choice_prompt() {
     2. Explain competition              Summarize the task, scoring, submissions, and practical strategy.
     3. Set up repo                      Plan project scaffolding, dependencies, data access, and first validation run.
     4. None of the above                Optionally, add details in notes (tab).
+EOF
+}
+
+make_plan_snake_game_choice_prompt() {
+    cat <<'EOF'
+  Question 1/2 (2 unanswered)
+  What form should the Snake game take?
+
+  › 1. Single HTML (Recommended)  A self-contained browser game with HTML, CSS, and JavaScript; easiest to run locally.
+    2. React app                  A small Vite/React project; better if you want component structure and future expansion.
+    3. Terminal game              A command-line Snake implementation; no browser UI.
+    4. None of the above          Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
 EOF
 }
 
@@ -747,6 +761,9 @@ assert_ok "Plan approval: detects numbered Research refresh question" \
 assert_ok "Plan approval: detects current Codex selected-option marker" \
     detect_plan_choice_prompt "$(make_plan_current_codex_choice_prompt)"
 
+assert_ok "Plan approval: detects Snake game form question" \
+    detect_plan_choice_prompt "$(make_plan_snake_game_choice_prompt)"
+
 assert_fail "Plan approval: normal planning text is not a prompt" \
     detect_plan_prompt "$(cat <<'PANE'
   Plan:
@@ -855,6 +872,18 @@ _test_plan_marker_accepts_long_running_plan() {
     )
 }
 assert_ok "Plan approval marker: accepts long-running control-pane plan" _test_plan_marker_accepts_long_running_plan
+
+assert_ok "Slash command prompt: detects clear confirmation" \
+    detect_slash_command_prompt "$(cat <<'PANE'
+Clear conversation?
+
+❯ Yes, clear context
+  Cancel
+PANE
+)"
+
+assert_fail "Slash command prompt: ignores clear text without choices" \
+    detect_slash_command_prompt "Use /clear later if you want a fresh context"
 
 ###############################################################################
 #              SLASH COMMAND PICKER DETECTION (detect_slash_picker)            #
@@ -1366,6 +1395,18 @@ PANE
 }
 assert_ok "control_collect_plan_prompt: leaves piped input line-by-line" _test_control_plan_does_not_collect_non_tty_by_default
 
+_test_control_read_line_non_tty_fallback() {
+    (
+        local output line
+        output="$(printf '/help\n' | {
+            control_read_line line || exit 1
+            printf 'LINE:%s' "$line"
+        })"
+        [[ "$output" == "codex-yolo> LINE:/help" ]]
+    )
+}
+assert_ok "control_read_line: plain read fallback for non-TTY input" _test_control_read_line_non_tty_fallback
+
 _test_control_loop_command_collects_pasted_prompt() {
     (
         local captured expected
@@ -1387,6 +1428,345 @@ PANE
     )
 }
 assert_ok "control-pane: /loop command collects pasted multiline prompt" _test_control_loop_command_collects_pasted_prompt
+
+_test_control_parse_queue_double_array() {
+    control_parse_queue_items '["/status", "/clear", "plain prompt"]' || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "3" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == "/status" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[1]}" == "/clear" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[2]}" == "plain prompt" ]]
+}
+assert_ok "control_parse_queue_items: parses double-quoted array" _test_control_parse_queue_double_array
+
+_test_control_parse_queue_single_array() {
+    control_parse_queue_items "['item1', 'item2', '/plan item3']" || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "3" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == "item1" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[2]}" == "/plan item3" ]]
+}
+assert_ok "control_parse_queue_items: parses single-quoted array" _test_control_parse_queue_single_array
+
+_test_control_parse_queue_triple_double_array() {
+    local input
+    input=$'["""item1\nitem1""", """item2\nitem2"""]'
+    control_parse_queue_items "$input" || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "2" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == $'item1\nitem1' ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[1]}" == $'item2\nitem2' ]]
+}
+assert_ok "control_parse_queue_items: parses triple double-quoted multiline array" _test_control_parse_queue_triple_double_array
+
+_test_control_parse_queue_user_multiline_example() {
+    local input
+    input=$'["""/plan write a \nsnake game""",\n"""how does \nit work?"""]'
+    control_parse_queue_items "$input" || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "2" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == $'/plan write a \nsnake game' ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[1]}" == $'how does \nit work?' ]]
+}
+assert_ok "control_parse_queue_items: parses multiline slash-command queue example" _test_control_parse_queue_user_multiline_example
+
+_test_control_parse_queue_triple_single_array() {
+    local input
+    input=$"['''item1
+item1''', '''item2
+item2''']"
+    control_parse_queue_items "$input" || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "2" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == $'item1\nitem1' ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[1]}" == $'item2\nitem2' ]]
+}
+assert_ok "control_parse_queue_items: parses triple single-quoted multiline array" _test_control_parse_queue_triple_single_array
+
+assert_fail "control_parse_queue_items: rejects bare comma list" \
+    control_parse_queue_items "item1, item2"
+
+assert_fail "control_parse_queue_items: rejects unquoted array items" \
+    control_parse_queue_items "[item1, item2]"
+
+assert_fail "control_parse_queue_items: rejects empty array" \
+    control_parse_queue_items "[]"
+
+assert_fail "control_parse_queue_items: rejects trailing comma" \
+    control_parse_queue_items '["item1",]'
+
+_test_control_queue_array_needs_more() {
+    control_queue_array_needs_more $'["""/plan write a \nsnake game"""'
+}
+assert_ok "control_queue_array_needs_more: detects incomplete multiline array" _test_control_queue_array_needs_more
+
+assert_fail "control_queue_array_needs_more: complete multiline array does not need more" \
+    control_queue_array_needs_more $'["""/plan write a \nsnake game"""]'
+
+_test_control_queue_command_collects_multiline_array() {
+    (
+        local captured expected
+        CODEX_YOLO_CONTROL_PLAN_PASTE=0
+
+        control_start_queue() {
+            printf '%s\t%s\t%s\t%s' \
+                "$1" \
+                "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" \
+                "${CONTROL_QUEUE_PARSED_ITEMS[0]}" \
+                "${CONTROL_QUEUE_PARSED_ITEMS[1]}"
+        }
+
+captured="$(control_handle_command '/queue ["""/plan write a ' <<'PANE'
+snake game""",
+"""how does
+it work?"""]
+PANE
+)"
+        expected=$'once\t2\t/plan write a \nsnake game\thow does\nit work?'
+        [[ "$captured" == "$expected" ]]
+    )
+}
+assert_ok "control-pane: /queue command collects multiline array continuations" _test_control_queue_command_collects_multiline_array
+
+_test_control_loop_queue_collects_multiline_array() {
+    (
+        local captured expected
+        CODEX_YOLO_CONTROL_PLAN_PASTE=0
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+            esac
+        }
+        control_start_queue() {
+            printf '%s\t%s\t%s\t%s\t%s' \
+                "$1" \
+                "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" \
+                "$3" \
+                "$4" \
+                "${CONTROL_QUEUE_PARSED_ITEMS[0]}"
+        }
+        SESSION_NAME="sess"
+        AUDIT_LOG="$(mktemp)"
+        SESSION_MODE="standard"
+        captured="$(control_start_loop "1h" "3600" '/queue ["""first' <<'PANE'
+line""",
+"""second
+line"""]
+PANE
+)"
+        rm -f "$AUDIT_LOG"
+        expected=$'loop\t2\t1h\t3600\tfirst\nline'
+        [[ "$captured" == "$expected" ]]
+    )
+}
+assert_ok "control-pane: /loop /queue collects multiline array continuations" _test_control_loop_queue_collects_multiline_array
+
+_test_control_queue_state_mutations() {
+    (
+        local state_dir items count second_item
+        state_dir="$(mktemp -d)"
+        items=("one" "two" "three")
+        control_queue_init_state "$state_dir" items || exit 1
+        QUEUE_STATE_DIRS[77]="$state_dir"
+        QUEUE_PIDS[77]="$$"
+
+        CONTROL_QUEUE_PARSED_ITEMS=("four")
+        control_queue_add_items 77 CONTROL_QUEUE_PARSED_ITEMS >/dev/null || exit 1
+        control_queue_edit_item 77 2 "two edited" >/dev/null || exit 1
+        control_queue_remove_items 77 3-4 >/dev/null || exit 1
+        control_queue_dequeue_item 77 >/dev/null || exit 1
+
+        count="$(wc -l < "$state_dir/order")"
+        second_item="$(cat "$state_dir/items/2")"
+        unset "QUEUE_STATE_DIRS[77]" "QUEUE_PIDS[77]"
+        rm -rf "$state_dir"
+
+        [[ "$count" == "1" ]] && [[ "$second_item" == "two edited" ]]
+    )
+}
+assert_ok "control_queue: add edit remove and dequeue pending items" _test_control_queue_state_mutations
+
+_test_control_queue_rejects_running_edit() {
+    (
+        local state_dir items
+        state_dir="$(mktemp -d)"
+        items=("one" "two")
+        control_queue_init_state "$state_dir" items || exit 1
+        QUEUE_STATE_DIRS[78]="$state_dir"
+        QUEUE_PIDS[78]="$$"
+        printf 'running\n' > "$state_dir/status"
+        printf '1\n' > "$state_dir/current_pos"
+        printf '2\n' > "$state_dir/next_pos"
+
+        if control_queue_edit_item 78 1 "nope" >/dev/null 2>&1; then
+            rm -rf "$state_dir"
+            exit 1
+        fi
+        unset "QUEUE_STATE_DIRS[78]" "QUEUE_PIDS[78]"
+        rm -rf "$state_dir"
+    )
+}
+assert_ok "control_queue: rejects editing running item" _test_control_queue_rejects_running_edit
+
+_test_control_queue_edit_requires_one_item() {
+    (
+        local output
+        control_queue_edit_item() {
+            return 0
+        }
+        output="$(control_handle_queue_command 'edit 1 2 ["a", "b"]' 2>&1 || true)"
+        [[ "$output" == *"requires exactly one"* ]]
+    )
+}
+assert_ok "control-pane: /queue edit requires one array item" _test_control_queue_edit_requires_one_item
+
+_test_control_send_queue_slash_arms_marker() {
+    (
+        local calls audit marker log marker_content
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.slash-approval"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%9\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_send_queue_item "sess" "$audit" "agent-1" "/clear" 3 1 >/dev/null || exit 1
+        log="$(cat "$calls")"
+        marker_content="$(cat "$marker")"
+        rm -f "$calls" "$audit" "$marker"
+
+        [[ "$log" == *"send-keys -t sess:agent-1 -l /clear"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]] && \
+        [[ "$marker_content" == %9$'\t'* ]]
+    )
+}
+assert_ok "control_queue: slash item arms scoped approval marker" _test_control_send_queue_slash_arms_marker
+
+_test_control_loop_queue_routes_to_queue_scheduler() {
+    (
+        local captured
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+            esac
+        }
+        control_start_queue() {
+            printf '%s\t%s\t%s\t%s\t%s' "$1" "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" "$3" "$4" "$6"
+        }
+        SESSION_NAME="sess"
+        AUDIT_LOG="$(mktemp)"
+        SESSION_MODE="standard"
+        captured="$(control_start_loop "1h" "3600" '/queue ["a", "b"]')"
+        rm -f "$AUDIT_LOG"
+        [[ "$captured" == $'loop\t2\t1h\t3600\t/queue ["a", "b"]' ]]
+    )
+}
+assert_ok "control-pane: /loop routes queued payloads to queue scheduler" _test_control_loop_queue_routes_to_queue_scheduler
+
+_test_control_loop_queue_visible_and_cancelable_from_loops() {
+    (
+        local audit list_output cancel_output queues_output
+        audit="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+            esac
+        }
+        control_queue_worker() {
+            while true; do
+                sleep 1
+            done
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        LOOP_PIDS=()
+        LOOP_INTERVALS=()
+        LOOP_SECONDS=()
+        LOOP_PROMPTS=()
+        LOOP_TARGETS=()
+        LOOP_TYPES=()
+        LOOP_QUEUE_IDS=()
+        QUEUE_PIDS=()
+        QUEUE_INTERVALS=()
+        QUEUE_SECONDS=()
+        QUEUE_TARGETS=()
+        QUEUE_TYPES=()
+        QUEUE_STATE_DIRS=()
+        QUEUE_LOOP_IDS=()
+        NEXT_LOOP_ID=1
+        NEXT_QUEUE_ID=1
+
+        CONTROL_QUEUE_PARSED_ITEMS=("/clear" "what time?")
+        control_start_queue "loop" CONTROL_QUEUE_PARSED_ITEMS "15s" "15" "" '/queue ["/clear", "what time?"]' >/dev/null || exit 1
+        list_output="$(control_list_loops)"
+        cancel_output="$(control_cancel_loop 1)"
+        queues_output="$(control_list_queues)"
+        rm -f "$audit"
+
+        [[ "$list_output" == *'#1 every 15s to agent-1: /queue ["/clear", "what time?"] (queue #1)'* ]] && \
+        [[ "$cancel_output" == "canceled loop #1" ]] && \
+        [[ "$queues_output" == "no active queues" ]]
+    )
+}
+assert_ok "control-pane: looped queue appears in /loops and cancels via /loops cancel" _test_control_loop_queue_visible_and_cancelable_from_loops
+
+_test_control_queue_worker_sends_items_in_order() {
+    (
+        local calls audit state_dir items log first_send second_send first_wait
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        state_dir="$(mktemp -d)"
+        items=("first" "second")
+        control_queue_init_state "$state_dir" items || exit 1
+
+        tmux() {
+            case "$1" in
+                has-session)
+                    return 0
+                    ;;
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+        control_wait_for_agent_idle() {
+            printf 'WAIT:%s\n' "$5" >> "$calls"
+            return 0
+        }
+
+        CONTROL_SUBMIT_DELAY=0
+        control_queue_worker "sess" "$audit" 5 "$state_dir" "agent-1" "" "" "once"
+        log="$(cat "$calls")"
+        first_send="$(printf '%s\n' "$log" | grep -n -- "-l first" | cut -d: -f1)"
+        first_wait="$(printf '%s\n' "$log" | grep -n -- "WAIT:1" | cut -d: -f1)"
+        second_send="$(printf '%s\n' "$log" | grep -n -- "-l second" | cut -d: -f1)"
+        rm -f "$calls" "$audit"
+        rm -rf "$state_dir"
+
+        [[ -n "$first_send" && -n "$first_wait" && -n "$second_send" ]] && \
+        (( first_send < first_wait && first_wait < second_send ))
+    )
+}
+assert_ok "control_queue_worker: waits between queued items" _test_control_queue_worker_sends_items_in_order
 
 section "control-pane — Permissions Auto-review"
 
@@ -2077,6 +2457,162 @@ _control_wait_for_capture() {
     printf '%s\n' "$capture"
     return 1
 }
+
+_control_start_control_window() {
+    tmux new-window -t "$_CONTROL_SESSION" -n "control" \
+        "bash '$SCRIPT_DIR/lib/control-pane.sh' '$_CONTROL_SESSION' '$_CONTROL_AUDIT' standard"
+}
+
+_test_control_readline_cursor_keys() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "test"
+    tmux send-keys -t "$_CONTROL_SESSION:control" Home
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "/plan "
+    tmux send-keys -t "$_CONTROL_SESSION:control" End
+    tmux send-keys -t "$_CONTROL_SESSION:control" Left Left Left Left
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "cursor "
+    tmux send-keys -t "$_CONTROL_SESSION:control" Right Right Right Right
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l " done"
+    tmux send-keys -t "$_CONTROL_SESSION:control" Enter
+
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan cursor test done" 80 0.1 || {
+        _control_debug_dump "agent pane did not receive readline-edited command"
+        _control_cleanup
+        return 1
+    }
+
+    local capture
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:agent-1" -100 || true)"
+    _control_cleanup
+    [[ "$capture" == *"READ:/plan cursor test done"* ]] && \
+    [[ "$capture" != *"^[[D"* ]]
+}
+assert_ok "control-pane: readline handles Home End Left and Right keys" _test_control_readline_cursor_keys
+
+_test_control_readline_history_up_down() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "/plan first"
+    tmux send-keys -t "$_CONTROL_SESSION:control" Enter
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan first" 80 0.1 || {
+        _control_debug_dump "agent pane did not receive first history command"
+        _control_cleanup
+        return 1
+    }
+
+    tmux send-keys -t "$_CONTROL_SESSION:control" Up
+    tmux send-keys -t "$_CONTROL_SESSION:control" Enter
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan first" 80 0.1 || {
+        _control_debug_dump "agent pane did not receive recalled history command"
+        _control_cleanup
+        return 1
+    }
+
+    tmux send-keys -t "$_CONTROL_SESSION:control" Up Down
+    tmux send-keys -t "$_CONTROL_SESSION:control" -l "/plan second"
+    tmux send-keys -t "$_CONTROL_SESSION:control" Enter
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan second" 80 0.1 || {
+        _control_debug_dump "agent pane did not receive second history command"
+        _control_cleanup
+        return 1
+    }
+
+    local capture
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:agent-1" -100 || true)"
+    local first_count
+    first_count="$(printf '%s\n' "$capture" | grep -c 'READ:/plan first' 2>/dev/null || true)"
+    _control_cleanup
+    [[ "$first_count" == "2" ]] && \
+    [[ "$capture" == *"READ:/plan second"* ]] && \
+    [[ "$capture" != *"READ:/plan first/plan second"* ]]
+}
+assert_ok "control-pane: readline handles Up and Down history keys" _test_control_readline_history_up_down
+
+_test_control_multiline_queue_paste_starts_queue() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    local input paste_buffer
+    input=$'/queue ["""/plan write a \nsnake game""",\n"""how does \nit work?"""]'
+    paste_buffer="control-queue-paste-$$"
+    printf '%s' "$input" | tmux load-buffer -b "$paste_buffer" - || {
+        tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
+        _control_debug_dump "failed to load queue paste buffer"
+        _control_cleanup
+        return 1
+    }
+    tmux paste-buffer -d -b "$paste_buffer" -t "$_CONTROL_SESSION:control" || {
+        tmux delete-buffer -b "$paste_buffer" 2>/dev/null || true
+        _control_debug_dump "failed to paste queue buffer into control pane"
+        _control_cleanup
+        return 1
+    }
+    tmux send-keys -t "$_CONTROL_SESSION:control" Enter
+
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "started queue #1" 80 0.1 || {
+        _control_debug_dump "multiline queue paste did not start queue"
+        _control_cleanup
+        return 1
+    }
+
+    local capture
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:control" -100 || true)"
+    _control_cleanup
+    [[ "$capture" == *"started queue #1"* ]] && \
+    [[ "$capture" != *"usage: /queue"* ]]
+}
+assert_ok "control-pane: pasted multiline /queue starts queue" _test_control_multiline_queue_paste_starts_queue
 
 _test_control_send_prompt_uses_enter_key() {
     (
@@ -3570,7 +4106,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -3607,7 +4143,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -3645,7 +4181,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -3681,7 +4217,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -3718,7 +4254,7 @@ OUTPUT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -4022,7 +4558,7 @@ PANE
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2

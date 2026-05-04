@@ -14,6 +14,7 @@ POLL_INTERVAL="${2:-0.3}"
 AUDIT_LOG="${3:-$(log_dir)/codex-yolo-${SESSION_NAME}.log}"
 COOLDOWN_SECS=2
 PLAN_APPROVAL_TTL="${CODEX_YOLO_PLAN_APPROVAL_TTL:-3600}"
+SLASH_APPROVAL_TTL="${CODEX_YOLO_SLASH_APPROVAL_TTL:-60}"
 
 # Associative array tracking last-approval timestamp per pane
 declare -A LAST_APPROVED
@@ -137,7 +138,7 @@ detect_plan_choice_prompt() {
     local tail_content
     tail_content="$(echo "$content" | tail -n 35)"
 
-    local has_question=0 has_recommended_choice=0 has_context=0
+    local has_question=0 has_recommended_choice=0
 
     if echo "$tail_content" | grep -qiE 'Question[[:space:]]+[0-9]+/[0-9]+'; then
         has_question=1
@@ -147,11 +148,7 @@ detect_plan_choice_prompt() {
         has_recommended_choice=1
     fi
 
-    if echo "$tail_content" | grep -qiE '(What do you want( me)? to (do|plan around)|execution plan|submitting a new candidate|reference link|submission slot|link|task)'; then
-        has_context=1
-    fi
-
-    if (( has_question && has_recommended_choice && has_context )); then
+    if (( has_question && has_recommended_choice )); then
         echo "plan-choice"
         return 0
     fi
@@ -169,9 +166,25 @@ plan_approval_file() {
     printf '%s.plan-approval\n' "$AUDIT_LOG"
 }
 
+slash_approval_file() {
+    if [[ -n "${CODEX_YOLO_SLASH_APPROVAL_FILE:-}" ]]; then
+        printf '%s\n' "$CODEX_YOLO_SLASH_APPROVAL_FILE"
+        return 0
+    fi
+
+    [[ -n "${AUDIT_LOG:-}" ]] || return 1
+    printf '%s.slash-approval\n' "$AUDIT_LOG"
+}
+
 clear_plan_approval_marker() {
     local marker
     marker="$(plan_approval_file 2>/dev/null)" || return 0
+    rm -f "$marker" 2>/dev/null || true
+}
+
+clear_slash_approval_marker() {
+    local marker
+    marker="$(slash_approval_file 2>/dev/null)" || return 0
     rm -f "$marker" 2>/dev/null || true
 }
 
@@ -190,6 +203,30 @@ plan_approval_marker_valid() {
 
     ttl="$PLAN_APPROVAL_TTL"
     [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=3600
+    now="$(date +%s)"
+    if (( now - marker_ts > ttl )); then
+        rm -f "$marker" 2>/dev/null || true
+        return 1
+    fi
+
+    [[ "$marker_pane" == "$pane" ]]
+}
+
+slash_approval_marker_valid() {
+    local pane="$1"
+    local marker marker_pane marker_ts now ttl
+
+    marker="$(slash_approval_file)" || return 1
+    [[ -f "$marker" ]] || return 1
+
+    IFS=$'\t ' read -r marker_pane marker_ts _ < "$marker" || return 1
+    if [[ -z "$marker_pane" || ! "$marker_ts" =~ ^[0-9]+$ ]]; then
+        rm -f "$marker" 2>/dev/null || true
+        return 1
+    fi
+
+    ttl="$SLASH_APPROVAL_TTL"
+    [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=60
     now="$(date +%s)"
     if (( now - marker_ts > ttl )); then
         rm -f "$marker" 2>/dev/null || true
@@ -231,6 +268,33 @@ detect_elicitation() {
             echo "elicitation"
             return 0
         fi
+    fi
+
+    return 1
+}
+
+detect_slash_command_prompt() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 25)"
+
+    local has_question=0 has_yes=0 has_no=0
+
+    if echo "$tail_content" | grep -qiE '(clear (conversation|context)|start (a )?new (conversation|chat)|discard conversation|are you sure|confirm)'; then
+        has_question=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*((_|❯|›)[[:space:]]*)?([0-9]+[.)][[:space:]]*)?(Yes|Clear|Confirm|Proceed|Continue)([[:space:]]|$)'; then
+        has_yes=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*((_|❯|›)[[:space:]]*)?([0-9]+[.)][[:space:]]*)?(No|Cancel|Go back|Keep)([[:space:]]|$)'; then
+        has_no=1
+    fi
+
+    if (( has_question && has_yes && has_no )); then
+        echo "slash-command"
+        return 0
     fi
 
     return 1
@@ -285,6 +349,16 @@ main_loop() {
                     clear_plan_approval_marker
                     LAST_APPROVED["$pane"]="$(date +%s)"
                     audit "$pane" "plan-control"
+                fi
+                continue
+            fi
+
+            if pattern="$(detect_slash_command_prompt "$content")"; then
+                if slash_approval_marker_valid "$pane"; then
+                    tmux send-keys -t "$pane" Enter 2>/dev/null || continue
+                    clear_slash_approval_marker
+                    LAST_APPROVED["$pane"]="$(date +%s)"
+                    audit "$pane" "slash-control"
                 fi
                 continue
             fi
