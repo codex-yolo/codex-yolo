@@ -540,20 +540,36 @@ control_disarm_slash_approval() {
     rm -f "$marker" 2>/dev/null || true
 }
 
+control_codex_prompt_line_visible() {
+    local content="$1" line
+
+    while IFS= read -r line; do
+        line="$(control_ltrim "$line")"
+        case "$line" in
+            ">"|"> "*|"›"|"› "*) return 0 ;;
+        esac
+    done <<< "$content"
+
+    return 1
+}
+
 control_codex_idle_visible() {
     local content="$1"
-    local tail_content last_nonempty prompt_re
+    local tail_content last_nonempty footer_re busy_re
 
-    tail_content="$(echo "$content" | tail -n 12)"
-    if echo "$tail_content" | grep -qiE '(Codex is working|disabled while a task is in progress|Would you like to|Approve app tool call|Question[[:space:]]+[0-9]+/[0-9]+)'; then
+    tail_content="$(echo "$content" | tail -n 20)"
+    busy_re='(Codex is working|esc to interrupt|disabled while a task is in progress|Would you like to|Approve app tool call|Question[[:space:]]+[0-9]+/[0-9]+|^[[:space:]]*◦[[:space:]]*(Working|Running|Exploring|Reading|Editing|Searching|Thinking)([[:space:]]|$|\())'
+    if echo "$tail_content" | grep -qiE "$busy_re"; then
         return 1
     fi
 
     last_nonempty="$(printf '%s\n' "$tail_content" | sed '/^[[:space:]]*$/d' | tail -n 1)"
     [[ "$last_nonempty" == "READY" ]] && return 0
     [[ "$last_nonempty" =~ (^|[[:space:]])Ready([[:space:]]|$) ]] && return 0
-    prompt_re='^[[:space:]]*[›>]([[:space:]]|$)'
-    [[ "$last_nonempty" =~ $prompt_re ]] && return 0
+    control_codex_prompt_line_visible "$last_nonempty" && return 0
+
+    footer_re='^[[:space:]]*[^[:space:]].*·.*Context[[:space:]][0-9]+%[[:space:]]+(left|used)'
+    [[ "$last_nonempty" =~ $footer_re ]] && control_codex_prompt_line_visible "$tail_content" && return 0
 
     return 1
 }

@@ -65,6 +65,16 @@ assert_fail() {
     fi
 }
 
+assert_skip() {
+    local desc="$1" reason="${2:-skipped}"
+    TOTAL=$((TOTAL+1))
+    if [[ -n "$FILTER" && "$desc" != *"$FILTER"* ]]; then
+        SKIP=$((SKIP+1)); return 0
+    fi
+    SKIP=$((SKIP+1))
+    (( VERBOSE )) && echo "  ${_yellow}SKIP${_reset} $desc ($reason)"
+}
+
 assert_eq() {
     local desc="$1" expected="$2" actual="$3"
     TOTAL=$((TOTAL+1))
@@ -1177,6 +1187,10 @@ assert_fail "Cooldown: pane %2 approved 10s ago, not in cooldown" \
 section "build_agent_cmd — Command construction"
 
 CODEX_YOLO_PERMISSION_PROFILE=""
+CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+CODEX_YOLO_FAKE_BWRAP_DIR=""
+CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: no model" \
@@ -1767,6 +1781,45 @@ _test_control_queue_worker_sends_items_in_order() {
     )
 }
 assert_ok "control_queue_worker: waits between queued items" _test_control_queue_worker_sends_items_in_order
+
+_test_control_idle_detects_status_footer_after_prompt() {
+    control_codex_idle_visible "$(cat <<'PANE'
+╭────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.128.0)                         │
+│                                                    │
+│ model:     gpt-5.5 xhigh   fast   /model to change │
+│ directory: ~                                       │
+╰────────────────────────────────────────────────────╯
+
+
+› Implement {feature}
+
+  gpt-5.5 xhigh fast · ~ · Context 100% left · Context 0% used · 0 in · 0 out
+
+
+
+
+
+PANE
+)"
+}
+assert_ok "control_codex_idle_visible: detects prompt before Codex status footer" _test_control_idle_detects_status_footer_after_prompt
+
+_test_control_idle_rejects_active_codex_status_footer() {
+    ! control_codex_idle_visible "$(cat <<'PANE'
+• Ran bash test_approver.sh "control-pane"
+  └ All 24 tests passed
+
+◦ Working (3m 07s • esc to interrupt)
+
+
+› Explain this codebase
+
+  gpt-5.5 xhigh fast · ~/codex-yolo · Context 74% left · Context 26% used · 860K in · 7.26K out
+PANE
+)"
+}
+assert_ok "control_codex_idle_visible: rejects active Codex footer layout" _test_control_idle_rejects_active_codex_status_footer
 
 section "control-pane — Permissions Auto-review"
 
@@ -5240,12 +5293,20 @@ _test_conflict_detected() {
     details="$(check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-2")"
     [[ "$details" == *"CONFLICT"* && "$details" == *"file.txt"* ]]
 }
-assert_ok "check_pair: detects conflicting branches" _test_conflict_detected
+if check_git_merge_tree; then
+    assert_ok "check_pair: detects conflicting branches" _test_conflict_detected
+else
+    assert_skip "check_pair: detects conflicting branches" "git merge-tree --write-tree requires Git 2.38+"
+fi
 
 _test_clean_merge() {
     check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-3"
 }
-assert_fail "check_pair: clean merge returns failure status" _test_clean_merge
+if check_git_merge_tree; then
+    assert_fail "check_pair: clean merge returns failure status" _test_clean_merge
+else
+    assert_skip "check_pair: clean merge returns failure status" "git merge-tree --write-tree requires Git 2.38+"
+fi
 
 _test_no_conflict_different_files() {
     local base="${_WT_REPO}-worktrees/${_WT_SESSION}"
@@ -5254,7 +5315,11 @@ _test_no_conflict_different_files() {
     git -C "${base}/${_WT_SESSION}-3" commit -m "agent 3 adds other file" >/dev/null 2>&1
     check_pair "${_WT_SESSION}-1" "${_WT_SESSION}-3"
 }
-assert_fail "check_pair: different-file changes merge cleanly" _test_no_conflict_different_files
+if check_git_merge_tree; then
+    assert_fail "check_pair: different-file changes merge cleanly" _test_no_conflict_different_files
+else
+    assert_skip "check_pair: different-file changes merge cleanly" "git merge-tree --write-tree requires Git 2.38+"
+fi
 
 ###############################################################################
 #                  MERGE RESOLUTION                                           #
@@ -5355,7 +5420,11 @@ _mr_cleanup
 
 section "codex-yolo — Worktree flag parsing"
 
-assert_ok "check_git_merge_tree: passes with supported git" check_git_merge_tree
+if check_git_merge_tree; then
+    assert_ok "check_git_merge_tree: passes with supported git" check_git_merge_tree
+else
+    assert_fail "check_git_merge_tree: rejects unsupported git" check_git_merge_tree
+fi
 
 _test_help_worktree() {
     local output
@@ -5431,7 +5500,11 @@ _test_full_lifecycle_no_conflict() {
     [[ ! -f "$(wt_state_file "$_WT_INTEG_SESSION")" ]] && \
     ! git -C "$_WT_INTEG_REPO" rev-parse --verify "${_WT_INTEG_SESSION}-1" >/dev/null 2>&1
 }
-assert_ok "lifecycle: create → commit no-conflict → merge → cleanup" _test_full_lifecycle_no_conflict
+if check_git_merge_tree; then
+    assert_ok "lifecycle: create → commit no-conflict → merge → cleanup" _test_full_lifecycle_no_conflict
+else
+    assert_skip "lifecycle: create → commit no-conflict → merge → cleanup" "git merge-tree --write-tree requires Git 2.38+"
+fi
 
 _test_full_lifecycle_with_conflict() {
     _wt_integ_cleanup
@@ -5474,7 +5547,11 @@ _test_full_lifecycle_with_conflict() {
     wt_cleanup "$_WT_INTEG_SESSION" >/dev/null 2>&1
     _wt_integ_cleanup
 }
-assert_ok "lifecycle: create → commit with conflict → detect → abort → cleanup" _test_full_lifecycle_with_conflict
+if check_git_merge_tree; then
+    assert_ok "lifecycle: create → commit with conflict → detect → abort → cleanup" _test_full_lifecycle_with_conflict
+else
+    assert_skip "lifecycle: create → commit with conflict → detect → abort → cleanup" "git merge-tree --write-tree requires Git 2.38+"
+fi
 
 _wt_teardown
 _wt_integ_cleanup 2>/dev/null || true
