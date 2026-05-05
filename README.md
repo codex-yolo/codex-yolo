@@ -219,8 +219,8 @@ once at startup so `/permissions` shows `Auto-review (current)`.
 2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop` and `/permissions auto-review`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
-   - Detects six prompt styles (see below)
-   - Sends `Enter` via `tmux send-keys` to confirm the pre-selected first option (always the approval option)
+   - Detects seven prompt styles (see below)
+   - Sends the confirm key via `tmux send-keys` to choose the first approval option (`Enter`, or `y` for prompts showing `Yes, proceed (y)`)
    - Applies a 2-second per-pane cooldown to prevent double-approvals
 4. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval and control event with timestamps. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
 
@@ -239,14 +239,14 @@ The approver requires the primary signal plus at least one secondary signal to f
 | Signal | Type | Patterns |
 |---|---|---|
 | Question/header | Primary | `Would you like to run`, `Would you like to make`, `Allow Codex to`, `Approve app tool call`, `Do you trust the contents`, `Enable full access` |
-| Approval options | Secondary (at least one) | `Yes, just this once`, `Yes, continue`, `Yes, and don't ask`, `Run the tool and continue`, `Apply full access`, `Yes, and allow this host` |
+| Approval options | Secondary (at least one) | `Yes, just this once`, `Yes, proceed (y)`, `Yes, continue`, `Yes, and don't ask`, `Run the tool and continue`, `Apply full access`, `Yes, and allow this host` |
 | Denial/context | Secondary (at least one) | `No, and tell Codex`, `Decline this tool call`, `Go back without`, `Cancel this`, `may have side effects`, `may access external`, `may modify`, `untrusted`, `prompt injection` |
 
 **Prompt types handled:**
 
 | Prompt | Trigger | Action |
 |---|---|---|
-| Command execution | `Would you like to run the following command?` | `Enter` → "Yes, just this once" |
+| Command execution | `Would you like to run the following command?` | `Enter` or `y` → first approval option |
 | File edits | `Would you like to make the following edits?` | `Enter` → "Yes, just this once" |
 | MCP tool calls | `Approve app tool call?` | `Enter` → "Run the tool and continue" |
 | Trust directory | `Do you trust the contents of this directory?` | `Enter` → "Yes, continue" |

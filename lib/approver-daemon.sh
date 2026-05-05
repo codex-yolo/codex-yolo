@@ -58,7 +58,8 @@ in_cooldown() {
 #   Style G (proceed): "Would you like to run the following command?"
 #          with "Yes, proceed (y)" / "No, and tell Codex what to do differently (esc)"
 #
-# All styles use a TUI selection list navigated with arrows, confirmed with Enter.
+# All styles use a TUI selection list navigated with arrows. Most are confirmed
+# with Enter; prompts that advertise "Yes, proceed (y)" are confirmed with y.
 # The first option (approval) is pre-selected by default.
 detect_prompt() {
     local content="$1"
@@ -74,7 +75,7 @@ detect_prompt() {
     fi
 
     # Secondary signal 1: Approval option text
-    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
+    if echo "$tail_content" | grep -qiE '(Yes, just this once|Yes, proceed[[:space:]]*\(y\)|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Yes, and allow this host)'; then
         has_approval_option=1
     fi
 
@@ -300,6 +301,19 @@ detect_slash_command_prompt() {
     return 1
 }
 
+approval_key_for_prompt() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 25)"
+
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*((_|❯|›)[[:space:]]*)?([0-9]+[.)][[:space:]]*)?Yes, proceed[[:space:]]*\(y\)([[:space:]]|$)'; then
+        printf '%s\n' "y"
+        return 0
+    fi
+
+    printf '%s\n' "Enter"
+}
+
 main_loop() {
     log_info "Approver daemon started for session '$SESSION_NAME' (poll=${POLL_INTERVAL}s, cooldown=${COOLDOWN_SECS}s)"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Daemon started for session=$SESSION_NAME" >> "$AUDIT_LOG"
@@ -365,8 +379,11 @@ main_loop() {
 
             # Detect permission prompt
             if pattern="$(detect_prompt "$content")"; then
-                # Send Enter to confirm the pre-selected first option (always the approval option)
-                tmux send-keys -t "$pane" Enter 2>/dev/null || continue
+                # Confirm the approval option. Current Codex command prompts may
+                # expose a literal y shortcut even when Enter is shown in help text.
+                local approval_key
+                approval_key="$(approval_key_for_prompt "$content")"
+                tmux send-keys -t "$pane" "$approval_key" 2>/dev/null || continue
                 LAST_APPROVED["$pane"]="$(date +%s)"
                 audit "$pane" "$pattern"
             elif pattern="$(detect_elicitation "$content")"; then
