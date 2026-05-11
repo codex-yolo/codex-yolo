@@ -171,6 +171,24 @@ When pasting a multiline `/plan` command into the interactive control pane, line
 Scheduled `/loop <interval> /plan <prompt>` commands use the same scoped plan approval marker as direct control-pane `/plan` commands on every iteration.
 Scheduled `/loop <interval> /queue [...]` commands wait for each queued item to complete before sending the next item, and they do not start the next loop iteration until the previous queue run has finished.
 
+### One-shot control commands from the CLI
+
+Pass `-c "/..."` to run a single slash command in the `control` window right after launch — same effect as typing it at the `codex-yolo>` prompt. To compose multiple commands, wrap them in `/queue [...]` rather than repeating `-c`.
+
+```bash
+codex-yolo -c "/loop 10m /plan Draft the next implementation plan"
+codex-yolo -c '/queue ["/plan first", "/loop 1h /plan continue"]'
+codex-yolo --resume -c "/loops"
+```
+
+Multi-line strings are sent as a paste, so multi-line `/plan` and `/queue` work:
+
+```bash
+codex-yolo -c "$(printf '/plan line one\nline two\nline three')"
+```
+
+When the launch also kicks off Codex Auto-review reconciliation (i.e. interactive mode with no task and the `codex-auto-review` permissions profile), the injection waits for that reconciliation to finish before sending keys, so the first `/plan` or `/loop` lands on the Codex chat prompt rather than the welcome / permissions screen.
+
 ## Options
 
 ```
@@ -179,6 +197,10 @@ Scheduled `/loop <interval> /queue [...]` commands wait for each queued item to 
 -m, --model MODEL     Model to use (e.g., o4-mini, o3, gpt-4.1)
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
+-c, --command STRING  Slash command to run in the control pane after launch
+                      (e.g. "/loop 10m /plan ...", "/queue [...]", "/help").
+                      Must start with '/'. Multi-line strings are sent as a paste.
+                      Works with --resume to inject into an existing session.
 -r, --resume          Re-attach to an existing yolo session
 --permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
 --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)

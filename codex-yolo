@@ -20,6 +20,11 @@ Options:
   -m, --model MODEL     Model to use (e.g., o4-mini, o3, gpt-4.1)
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
+  -c, --command STRING  Slash command to run in the control pane after launch
+                        (e.g. "/loop 10m /plan ...", "/queue [...]", "/help").
+                        Must start with '/'. Multi-line strings are sent as a paste.
+                        Compose multiple commands via /queue rather than repeating -c.
+                        Works with --resume to inject into an existing session.
   -r, --resume          Re-attach to an existing yolo session
   --permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
   --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
@@ -39,6 +44,9 @@ Examples:
   codex-yolo --model o4-mini --dir /my/project "refactor the API layer"
   codex-yolo --file prompt.txt
   codex-yolo --resume
+  codex-yolo -c "/loop 10m /plan Draft the next implementation plan"
+  codex-yolo -c '/queue ["/plan first", "/loop 1h /plan continue"]'
+  codex-yolo --resume -c "/loops"
   codex-yolo -w -s feat -d /repo "add auth" "add tests" "add docs"
 EOF
 }
@@ -75,11 +83,24 @@ codex_yolo_start_auto_review_reconciliation() {
     disown
 }
 
+codex_yolo_inject_control_command() {
+    local script_dir="$1" session="$2" audit_log="$3" command="$4"
+    local await_auto_review="${5:-0}"
+
+    log_info "Injecting control command: ${command:0:60}${command:60:+...}"
+    (
+        export CODEX_YOLO_INJECT_AWAIT_AUTO_REVIEW="$await_auto_review"
+        bash "$script_dir/lib/control-pane.sh" "$session" "$audit_log" inject-once "$command"
+    ) >/dev/null 2>&1 &
+    disown
+}
+
 main() {
     local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
     local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
+    local control_command=""
     local tasks=()
 
     # Parse arguments
@@ -90,6 +111,14 @@ main() {
             -m|--model)    model="$2"; shift 2 ;;
             -p|--poll)     poll_interval="$2"; shift 2 ;;
             -f|--file)     prompt_file="$2"; shift 2 ;;
+            -c|--command)
+                if [[ -n "$control_command" ]]; then
+                    log_error "Only one -c/--command may be given; compose multiple commands via /queue [...]"
+                    exit 1
+                fi
+                control_command="$2"
+                shift 2
+                ;;
             -w|--worktree)     worktree_mode=1; shift ;;
             --base-branch)     base_branch="$2"; shift 2 ;;
             --no-merge)        no_merge=1; shift ;;
@@ -105,6 +134,14 @@ main() {
         esac
     done
 
+    # Validate -c/--command
+    if [[ -n "$control_command" ]]; then
+        if [[ "${control_command:0:1}" != "/" ]]; then
+            log_error "-c/--command must start with '/' (got: ${control_command:0:40})"
+            exit 1
+        fi
+    fi
+
     # Check prerequisites
     check_prereqs || exit 1
 
@@ -117,6 +154,10 @@ main() {
             exit 1
         fi
         log_info "Re-attaching to session: $existing"
+        if [[ -n "$control_command" ]]; then
+            local resumed_audit_log="$(log_dir)/codex-yolo-${existing}.log"
+            codex_yolo_inject_control_command "$SCRIPT_DIR" "$existing" "$resumed_audit_log" "$control_command"
+        fi
         exec tmux_attach "$existing"
     fi
 
@@ -211,8 +252,10 @@ main() {
 
     log_info "Started agent-1: ${first_task:+${first_task:0:60}...}${first_task:-interactive}"
 
+    local auto_review_pending=0
     if codex_yolo_should_reconcile_auto_review "$worktree_mode" "${#tasks[@]}" "$first_task"; then
         codex_yolo_start_auto_review_reconciliation "$SCRIPT_DIR" "$SESSION_NAME" "$AUDIT_LOG"
+        auto_review_pending=1
     fi
 
     # Create additional agent windows
@@ -281,6 +324,14 @@ main() {
     local control_log="${AUDIT_LOG//\'/\'\\\'\'}"
     tmux send-keys -t "$SESSION_NAME:control" \
         "bash '$control_script/lib/control-pane.sh' '$control_session' '$control_log' '$control_mode'" C-m
+
+    # Inject one-shot control command if requested. When auto-review reconciliation
+    # is also in flight, gate the injection on its completion so the first /loop or
+    # /plan keystrokes don't land on the Codex welcome / permissions screen.
+    if [[ -n "$control_command" ]]; then
+        codex_yolo_inject_control_command \
+            "$SCRIPT_DIR" "$SESSION_NAME" "$AUDIT_LOG" "$control_command" "$auto_review_pending"
+    fi
 
     # Select the first agent window
     tmux select-window -t "$SESSION_NAME:agent-1"

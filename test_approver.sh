@@ -3391,6 +3391,299 @@ _test_control_loop_dispatches_plan_prompt() {
 }
 assert_ok "control-pane: /loop dispatches /plan with approval marker" _test_control_loop_dispatches_plan_prompt
 
+_test_control_inject_once_help() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once "/help" \
+        >/dev/null 2>&1 || {
+        _control_debug_dump "inject-once /help failed"
+        _control_cleanup
+        return 1
+    }
+
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "Available commands" 50 0.1 || {
+        _control_debug_dump "control window did not render /help output"
+        _control_cleanup
+        return 1
+    }
+
+    local audit_content
+    audit_content="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    _control_cleanup
+    [[ "$audit_content" == *"INJECT one-shot: /help"* ]]
+}
+assert_ok "control-pane: inject-once injects /help into control pane" _test_control_inject_once_help
+
+_test_control_inject_once_plan_single_line() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once \
+        "/plan inject single line" >/dev/null 2>&1 || {
+        _control_debug_dump "inject-once /plan failed"
+        _control_cleanup
+        return 1
+    }
+
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:/plan inject single line" 80 0.1 || {
+        _control_debug_dump "agent did not receive /plan via inject-once"
+        _control_cleanup
+        return 1
+    }
+
+    local audit_content marker_content
+    audit_content="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    marker_content="$(cat "${_CONTROL_AUDIT}.plan-approval" 2>/dev/null || true)"
+    _control_cleanup
+    [[ "$audit_content" == *"INJECT one-shot: /plan inject single line"* ]] && \
+    [[ "$audit_content" == *"PLAN sent to agent-1"* ]] && \
+    [[ "$marker_content" == %* ]]
+}
+assert_ok "control-pane: inject-once dispatches single-line /plan" _test_control_inject_once_plan_single_line
+
+_test_control_inject_once_plan_multiline() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once \
+        $'/plan multi line first\nmulti line second' >/dev/null 2>&1 || {
+        _control_debug_dump "inject-once multi-line /plan failed"
+        _control_cleanup
+        return 1
+    }
+
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:multi line second" 80 0.1 || {
+        _control_debug_dump "agent did not receive multi-line /plan second line"
+        _control_cleanup
+        return 1
+    }
+
+    local capture
+    capture="$(_control_capture_joined "$_CONTROL_SESSION:agent-1" -100 || true)"
+    _control_cleanup
+    [[ "$capture" == *"READ:/plan multi line first"* ]] && \
+    [[ "$capture" == *"READ:multi line second"* ]]
+}
+assert_ok "control-pane: inject-once dispatches multi-line /plan" _test_control_inject_once_plan_multiline
+
+_test_control_inject_once_loop_schedules() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READY" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once \
+        "/loop 30s inject loop prompt" >/dev/null 2>&1 || {
+        _control_debug_dump "inject-once /loop failed"
+        _control_cleanup
+        return 1
+    }
+
+    _control_wait_for_capture "$_CONTROL_SESSION:agent-1" "READ:inject loop prompt" 80 0.1 || {
+        _control_debug_dump "agent did not receive /loop initial fire"
+        _control_cleanup
+        return 1
+    }
+
+    local audit_content
+    audit_content="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    _control_cleanup
+    [[ "$audit_content" == *"INJECT one-shot: /loop 30s inject loop prompt"* ]] && \
+    [[ "$audit_content" == *"LOOP #1 scheduled"* ]] && \
+    [[ "$audit_content" == *"LOOP #1 sent to agent-1"* ]]
+}
+assert_ok "control-pane: inject-once schedules /loop and fires immediately" _test_control_inject_once_loop_schedules
+
+_test_control_inject_once_rejects_empty() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_start_control_window || {
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_cleanup
+        return 1
+    }
+
+    local rc=0
+    bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once "" \
+        >/dev/null 2>&1 || rc=$?
+
+    local audit_content
+    audit_content="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    _control_cleanup
+    (( rc != 0 )) && [[ "$audit_content" == *"INJECT skipped: empty command"* ]]
+}
+assert_ok "control-pane: inject-once rejects empty command" _test_control_inject_once_rejects_empty
+
+_test_control_inject_once_waits_for_auto_review() {
+    _control_cleanup
+    : > "$_CONTROL_AUDIT"
+    _control_start_read_agent || return 1
+    _control_start_control_window || {
+        _control_debug_dump "failed to create control window"
+        _control_cleanup
+        return 1
+    }
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "codex-yolo control ready" 50 0.1 || {
+        _control_debug_dump "control pane did not become ready"
+        _control_cleanup
+        return 1
+    }
+
+    local injector_log
+    injector_log="$(mktemp)"
+    CODEX_YOLO_INJECT_AWAIT_AUTO_REVIEW=1 \
+    CODEX_YOLO_INJECT_AUTO_REVIEW_ATTEMPTS=200 \
+    CODEX_YOLO_INJECT_AUTO_REVIEW_DELAY=0.05 \
+    CODEX_YOLO_INJECT_POST_AUTO_REVIEW_GRACE=0 \
+        bash "$SCRIPT_DIR/lib/control-pane.sh" "$_CONTROL_SESSION" "$_CONTROL_AUDIT" inject-once "/help" \
+        >"$injector_log" 2>&1 &
+    local injector_pid=$!
+
+    sleep 0.6
+    local mid_audit
+    mid_audit="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    if [[ "$mid_audit" == *"INJECT one-shot: /help"* ]]; then
+        kill "$injector_pid" 2>/dev/null || true
+        wait "$injector_pid" 2>/dev/null || true
+        rm -f "$injector_log"
+        _control_debug_dump "inject-once fired before auto-review sentinel"
+        _control_cleanup
+        return 1
+    fi
+    if [[ "$mid_audit" != *"INJECT awaiting auto-review reconciliation"* ]]; then
+        kill "$injector_pid" 2>/dev/null || true
+        wait "$injector_pid" 2>/dev/null || true
+        rm -f "$injector_log"
+        _control_debug_dump "inject-once did not log auto-review wait"
+        _control_cleanup
+        return 1
+    fi
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] CONTROL PERMISSIONS auto-review selected: agent-1" >> "$_CONTROL_AUDIT"
+
+    wait "$injector_pid"
+    local injector_rc=$?
+    rm -f "$injector_log"
+
+    _control_wait_for_capture "$_CONTROL_SESSION:control" "Available commands" 50 0.1 || {
+        _control_debug_dump "control window did not render /help after auto-review sentinel"
+        _control_cleanup
+        return 1
+    }
+
+    local audit_content
+    audit_content="$(cat "$_CONTROL_AUDIT" 2>/dev/null || true)"
+    _control_cleanup
+    (( injector_rc == 0 )) && \
+    [[ "$audit_content" == *"INJECT awaiting auto-review reconciliation"* ]] && \
+    [[ "$audit_content" == *"INJECT auto-review reconciliation done"* ]] && \
+    [[ "$audit_content" == *"INJECT one-shot: /help"* ]]
+}
+assert_ok "control-pane: inject-once awaits auto-review when env var is set" _test_control_inject_once_waits_for_auto_review
+
+_test_control_wait_auto_review_completion_matches_sentinels() {
+    (
+        source "$SCRIPT_DIR/lib/control-pane.sh" 2>/dev/null || true
+        local tmp
+        tmp="$(mktemp)"
+        CONTROL_INJECT_AUTO_REVIEW_ATTEMPTS=4
+        CONTROL_INJECT_AUTO_REVIEW_DELAY=0.05
+
+        : > "$tmp"
+        echo "PERMISSIONS auto-review startup waiting: agent-1" >> "$tmp"
+        echo "PERMISSIONS auto-review startup busy: agent-1 attempt=3" >> "$tmp"
+        control_wait_auto_review_completion "$tmp" && { rm -f "$tmp"; exit 1; }
+
+        echo "PERMISSIONS auto-review selected: agent-1" >> "$tmp"
+        control_wait_auto_review_completion "$tmp" || { rm -f "$tmp"; exit 2; }
+
+        : > "$tmp"
+        echo "PERMISSIONS auto-review already current: agent-1" >> "$tmp"
+        control_wait_auto_review_completion "$tmp" || { rm -f "$tmp"; exit 3; }
+
+        : > "$tmp"
+        echo "PERMISSIONS auto-review startup timed out: agent-1" >> "$tmp"
+        control_wait_auto_review_completion "$tmp" || { rm -f "$tmp"; exit 4; }
+
+        rm -f "$tmp"
+        exit 0
+    )
+}
+assert_ok "control-pane: control_wait_auto_review_completion matches terminal sentinels only" _test_control_wait_auto_review_completion_matches_sentinels
+
+_test_codex_yolo_rejects_command_without_slash() {
+    local output rc=0
+    output="$(bash "$SCRIPT_DIR/codex-yolo" -c "no-slash" 2>&1)" || rc=$?
+    (( rc != 0 )) && [[ "$output" == *"must start with '/'"* ]]
+}
+assert_ok "codex-yolo: -c rejects argument without leading slash" _test_codex_yolo_rejects_command_without_slash
+
+_test_codex_yolo_rejects_duplicate_command() {
+    local output rc=0
+    output="$(bash "$SCRIPT_DIR/codex-yolo" -c "/help" -c "/loops" 2>&1)" || rc=$?
+    (( rc != 0 )) && [[ "$output" == *"Only one -c"* ]]
+}
+assert_ok "codex-yolo: -c rejects duplicate occurrences" _test_codex_yolo_rejects_duplicate_command
+
 _control_cleanup
 
 section "configure_codex_permissions — Permission profile defaults"

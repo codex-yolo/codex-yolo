@@ -35,6 +35,11 @@ CONTROL_MULTILINE_PASTE_DELAY="${CODEX_YOLO_CONTROL_MULTILINE_PASTE_DELAY:-0.8}"
 CONTROL_QUEUE_WAIT_DELAY="${CODEX_YOLO_CONTROL_QUEUE_WAIT_DELAY:-1}"
 CONTROL_QUEUE_POST_SEND_GRACE="${CODEX_YOLO_CONTROL_QUEUE_POST_SEND_GRACE:-0.5}"
 CONTROL_QUEUE_LOCK_DELAY="${CODEX_YOLO_CONTROL_QUEUE_LOCK_DELAY:-0.05}"
+CONTROL_INJECT_ATTEMPTS="${CODEX_YOLO_CONTROL_INJECT_ATTEMPTS:-100}"
+CONTROL_INJECT_DELAY="${CODEX_YOLO_CONTROL_INJECT_DELAY:-0.1}"
+CONTROL_INJECT_AUTO_REVIEW_ATTEMPTS="${CODEX_YOLO_INJECT_AUTO_REVIEW_ATTEMPTS:-1200}"
+CONTROL_INJECT_AUTO_REVIEW_DELAY="${CODEX_YOLO_INJECT_AUTO_REVIEW_DELAY:-0.5}"
+CONTROL_INJECT_POST_AUTO_REVIEW_GRACE="${CODEX_YOLO_INJECT_POST_AUTO_REVIEW_GRACE:-0.5}"
 CONTROL_QUEUE_PARSED_ITEMS=()
 
 control_audit() {
@@ -1879,9 +1884,93 @@ control_main() {
     control_audit "control pane stopped"
 }
 
+control_wait_auto_review_completion() {
+    local audit_log="$1"
+    local attempts="$CONTROL_INJECT_AUTO_REVIEW_ATTEMPTS"
+    local delay="$CONTROL_INJECT_AUTO_REVIEW_DELAY"
+    local attempt
+    # Terminal sentinels emitted by control_wait_set_auto_review / control_set_auto_review:
+    #   "selected"              — Auto-review activated (success)
+    #   "already current"       — was already current (success)
+    #   "row missing"           — permissions row not visible (fail)
+    #   "select failed"         — could not select the row (fail)
+    #   "startup timed out"     — ran out of attempts (fail)
+    #   "startup target missing" — agent window gone (fail)
+    #   "startup welcome continue failed" — could not advance welcome (fail)
+    local pattern='PERMISSIONS auto-review (selected|already current|row missing|select failed|startup timed out|startup target missing|startup welcome continue failed)'
+
+    [[ -n "$audit_log" ]] || return 0
+
+    for (( attempt=1; attempt<=attempts; attempt++ )); do
+        if [[ -f "$audit_log" ]] && grep -qE "$pattern" "$audit_log" 2>/dev/null; then
+            return 0
+        fi
+        sleep "$delay" 2>/dev/null || true
+    done
+    return 1
+}
+
+control_inject_command_once() {
+    local session="$1" audit_log="$2" command="$3"
+    local target="${session}:control"
+    local attempt content="" preview
+
+    if [[ -z "$command" ]]; then
+        AUDIT_LOG="$audit_log" control_audit "INJECT skipped: empty command"
+        return 1
+    fi
+
+    for (( attempt=1; attempt<=CONTROL_INJECT_ATTEMPTS; attempt++ )); do
+        if ! tmux has-session -t "$session" 2>/dev/null; then
+            AUDIT_LOG="$audit_log" control_audit "INJECT aborted: session gone ($session)"
+            return 1
+        fi
+        content="$(control_capture_target "$target" 2>/dev/null)" || content=""
+        [[ "$content" == *"codex-yolo control ready"* ]] && break
+        sleep "$CONTROL_INJECT_DELAY" 2>/dev/null || true
+    done
+
+    if [[ "$content" != *"codex-yolo control ready"* ]]; then
+        AUDIT_LOG="$audit_log" control_audit "INJECT timeout waiting for control pane: $target"
+        return 1
+    fi
+
+    # Optionally hold until the parallel auto-review reconciliation finishes,
+    # so keystrokes don't land on Codex's welcome / permissions screen.
+    if [[ "${CODEX_YOLO_INJECT_AWAIT_AUTO_REVIEW:-0}" == "1" ]]; then
+        AUDIT_LOG="$audit_log" control_audit "INJECT awaiting auto-review reconciliation"
+        if ! control_wait_auto_review_completion "$audit_log"; then
+            AUDIT_LOG="$audit_log" control_audit "INJECT timed out waiting for auto-review reconciliation"
+            return 1
+        fi
+        AUDIT_LOG="$audit_log" control_audit "INJECT auto-review reconciliation done; proceeding"
+        sleep "$CONTROL_INJECT_POST_AUTO_REVIEW_GRACE" 2>/dev/null || true
+    fi
+
+    preview="${command:0:80}"
+    (( ${#command} > 80 )) && preview+="..."
+    AUDIT_LOG="$audit_log" control_audit "INJECT one-shot: $preview"
+
+    if ! control_send_text_to_target "$target" "$command"; then
+        AUDIT_LOG="$audit_log" control_audit "INJECT send-keys failed: $target"
+        return 1
+    fi
+    control_delay_after_text_send "$command"
+    if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
+        AUDIT_LOG="$audit_log" control_audit "INJECT Enter failed: $target"
+        return 1
+    fi
+
+    return 0
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     if [[ "$SESSION_MODE" == "auto-review-once" ]]; then
         control_wait_set_auto_review "$SESSION_NAME" "$AUDIT_LOG" "agent-1"
+        exit $?
+    fi
+    if [[ "$SESSION_MODE" == "inject-once" ]]; then
+        control_inject_command_once "$SESSION_NAME" "$AUDIT_LOG" "${4:-}"
         exit $?
     fi
     control_main "$@"
