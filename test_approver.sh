@@ -1512,6 +1512,17 @@ _test_control_parse_queue_user_multiline_example() {
 }
 assert_ok "control_parse_queue_items: parses multiline slash-command queue example" _test_control_parse_queue_user_multiline_example
 
+_test_control_parse_queue_cr_pasted_multiline_example() {
+    local input
+    input=$'["""/plan\rwrite a plan""",\r"""execute\rthe plan"""]'
+    control_parse_queue_items "$input" || return 1
+    [[ "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" == "2" ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[0]}" == $'/plan\nwrite a plan' ]] && \
+    [[ "${CONTROL_QUEUE_PARSED_ITEMS[1]}" == $'execute\nthe plan' ]] && \
+    control_is_plan_command "${CONTROL_QUEUE_PARSED_ITEMS[0]}"
+}
+assert_ok "control_parse_queue_items: normalizes CR-only pasted multiline queue" _test_control_parse_queue_cr_pasted_multiline_example
+
 _test_control_parse_queue_triple_single_array() {
     local input
     input=$"['''item1
@@ -1719,6 +1730,38 @@ _test_control_loop_queue_routes_to_queue_scheduler() {
     )
 }
 assert_ok "control-pane: /loop routes queued payloads to queue scheduler" _test_control_loop_queue_routes_to_queue_scheduler
+
+_test_control_loop_queue_normalizes_cr_payload() {
+    (
+        SESSION_MODE="standard"
+        SESSION_NAME="sess"
+        AUDIT_LOG="$(mktemp)"
+        NEXT_LOOP_ID=1
+        NEXT_QUEUE_ID=1
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+            esac
+        }
+        control_start_queue() {
+            local plan_item=0
+            control_is_plan_command "${CONTROL_QUEUE_PARSED_ITEMS[0]}" && plan_item=1
+            printf '%s\t%s\t%s\t%s\t%s' \
+                "$1" \
+                "${#CONTROL_QUEUE_PARSED_ITEMS[@]}" \
+                "${CONTROL_QUEUE_PARSED_ITEMS[0]}" \
+                "${CONTROL_QUEUE_PARSED_ITEMS[1]}" \
+                "$plan_item"
+        }
+
+        captured="$(control_start_loop "1h" "3600" $'/queue ["""/plan\rfirst""",\r"""second\rline"""]')"
+        rm -f "$AUDIT_LOG"
+        [[ "$captured" == $'loop\t2\t/plan\nfirst\tsecond\nline\t1' ]]
+    )
+}
+assert_ok "control-pane: /loop /queue normalizes CR-only pasted payload" _test_control_loop_queue_normalizes_cr_payload
 
 _test_control_loop_queue_visible_and_cancelable_from_loops() {
     (
@@ -2841,6 +2884,54 @@ _test_control_plan_sends_multiline_prompt() {
     )
 }
 assert_ok "control-pane: /plan sends multiline prompt" _test_control_plan_sends_multiline_prompt
+
+_test_control_plan_normalizes_cr_prompt_before_paste() {
+    (
+        local calls audit marker payload log expected_payload
+        calls="$(mktemp)"
+        audit="$(mktemp)"
+        marker="${audit}.plan-approval"
+        payload="$(mktemp)"
+
+        tmux() {
+            case "$1" in
+                list-windows)
+                    printf 'agent-1\n'
+                    ;;
+                display-message)
+                    printf '%%7\n'
+                    ;;
+                load-buffer)
+                    printf '%s\n' "$*" >> "$calls"
+                    cat > "$payload"
+                    ;;
+                paste-buffer)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+                send-keys)
+                    printf '%s\n' "$*" >> "$calls"
+                    ;;
+            esac
+        }
+
+        SESSION_NAME="sess"
+        AUDIT_LOG="$audit"
+        SESSION_MODE="standard"
+        CONTROL_SUBMIT_DELAY=0
+        CONTROL_MULTILINE_PASTE_DELAY=0
+        control_start_plan $'first line\rsecond line\r\rfourth line' >/dev/null || exit 1
+
+        log="$(cat "$calls")"
+        expected_payload=$'/plan first line\nsecond line\n\nfourth line'
+        [[ "$(cat "$payload")" == "$expected_payload" ]] || exit 1
+        rm -f "$calls" "$audit" "$marker" "$payload"
+
+        [[ "$log" == *"load-buffer -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"paste-buffer -dpr -b codex-yolo-paste-"* ]] && \
+        [[ "$log" == *"send-keys -t sess:agent-1 Enter"* ]]
+    )
+}
+assert_ok "control-pane: /plan normalizes CR pasted prompt before paste" _test_control_plan_normalizes_cr_prompt_before_paste
 
 _test_control_plan_command_collects_unterminated_paste() {
     (

@@ -61,8 +61,16 @@ control_trim() {
     control_rtrim "$value"
 }
 
+control_normalize_line_endings() {
+    local value="$1"
+    value="${value//$'\r\n'/$'\n'}"
+    value="${value//$'\r'/$'\n'}"
+    printf '%s' "$value"
+}
+
 control_preview() {
     local value="$1"
+    value="$(control_normalize_line_endings "$value")"
     if (( ${#value} > 80 )); then
         printf '%s...' "${value:0:77}"
     else
@@ -130,6 +138,7 @@ control_parse_queue_items() {
     local text="$1" pos=0 len="${#1}" ch item
 
     CONTROL_QUEUE_PARSED_ITEMS=()
+    text="$(control_normalize_line_endings "$text")"
     text="$(control_trim "$text")"
     len="${#text}"
     (( len > 0 )) || return 1
@@ -179,6 +188,7 @@ control_parse_queue_items() {
 control_queue_array_needs_more() {
     local text="$1" pos=0 len ch quote in_string=0 triple=0
 
+    text="$(control_normalize_line_endings "$text")"
     text="$(control_ltrim "$text")"
     len="${#text}"
     (( len > 0 )) || return 1
@@ -250,11 +260,14 @@ control_collect_queue_array_payload() {
     local payload="$1" line
 
     payload="$(control_collect_queue_payload "$payload")"
+    payload="$(control_normalize_line_endings "$payload")"
     while control_queue_array_needs_more "$payload"; do
         if ! control_read_continuation_line line "codex-yolo queue> "; then
             break
         fi
+        line="$(control_normalize_line_endings "$line")"
         payload+=$'\n'"$line"
+        payload="$(control_normalize_line_endings "$payload")"
     done
 
     printf '%s' "$payload"
@@ -284,6 +297,7 @@ control_parse_loop_command() {
     local line="$1"
     local rest interval prompt seconds
 
+    line="$(control_normalize_line_endings "$line")"
     [[ "$line" == "/loop" || "$line" == "/loop "* || "$line" == $'/loop\t'* ]] || return 1
 
     rest="${line#/loop}"
@@ -312,6 +326,8 @@ control_collect_plan_prompt() {
     local prompt="$1"
     local delay ch chunk="" tty_state="" restore_tty=0
 
+    prompt="$(control_normalize_line_endings "$prompt")"
+
     control_plan_paste_enabled || {
         printf '%s' "$prompt"
         return 0
@@ -337,6 +353,7 @@ control_collect_plan_prompt() {
     fi
 
     if [[ -n "$chunk" ]]; then
+        chunk="$(control_normalize_line_endings "$chunk")"
         # The submit newline for a pasted command is a delimiter, not prompt text.
         [[ "$chunk" == *$'\n' ]] && chunk="${chunk%$'\n'}"
         if [[ -n "$prompt" ]]; then
@@ -361,6 +378,7 @@ control_read_line() {
         if ! IFS= read -e -r -p "codex-yolo> " __line_value; then
             return 1
         fi
+        __line_value="$(control_normalize_line_endings "$__line_value")"
         if [[ -n "$__line_value" ]]; then
             history -s "$__line_value" 2>/dev/null || true
         fi
@@ -369,6 +387,7 @@ control_read_line() {
         if ! IFS= read -r __line_value; then
             return 1
         fi
+        __line_value="$(control_normalize_line_endings "$__line_value")"
     fi
 
     printf -v "$__line_var" '%s' "$__line_value"
@@ -376,7 +395,8 @@ control_read_line() {
 
 control_is_plan_command() {
     local command="$1"
-    [[ "$command" == "/plan" || "$command" == "/plan "* || "$command" == $'/plan\t'* ]]
+    command="$(control_normalize_line_endings "$command")"
+    [[ "$command" == "/plan" || "$command" =~ ^/plan[[:space:]] ]]
 }
 
 control_agent_exists() {
@@ -387,6 +407,8 @@ control_agent_exists() {
 control_send_text_to_target() {
     local target="$1" text="$2"
     local buffer
+
+    text="$(control_normalize_line_endings "$text")"
 
     if [[ "$text" != *$'\n'* ]]; then
         tmux send-keys -t "$target" -l "$text" 2>/dev/null
@@ -406,6 +428,8 @@ control_send_text_to_target() {
 
 control_delay_after_text_send() {
     local text="$1"
+
+    text="$(control_normalize_line_endings "$text")"
 
     if [[ "$text" == *$'\n'* ]]; then
         sleep "$CONTROL_MULTILINE_PASTE_DELAY" 2>/dev/null || true
@@ -873,6 +897,8 @@ control_send_slash_with_approval() {
 control_send_queue_item() {
     local session="$1" audit_log="$2" target_window="$3" item="$4" queue_id="$5" item_index="$6"
 
+    item="$(control_normalize_line_endings "$item")"
+
     if control_is_plan_command "$item"; then
         control_send_plan_with_approval "$session" "$audit_log" "$target_window" "$item" "QUEUE #$queue_id item $item_index plan"
     elif [[ "$item" == /* ]]; then
@@ -884,7 +910,8 @@ control_send_queue_item() {
 
 control_is_queue_command() {
     local command="$1"
-    [[ "$command" == "/queue" || "$command" == "/queue "* || "$command" == $'/queue\t'* ]]
+    command="$(control_normalize_line_endings "$command")"
+    [[ "$command" == "/queue" || "$command" =~ ^/queue[[:space:]] ]]
 }
 
 control_collect_queue_payload() {
@@ -1426,6 +1453,8 @@ control_start_loop() {
     local target_window="agent-1"
     local loop_id pid preview loop_type="prompt"
 
+    prompt="$(control_normalize_line_endings "$prompt")"
+
     if [[ "$SESSION_MODE" == "worktree" ]]; then
         echo "/loop is disabled in worktree mode because agent windows run codex exec and may exit."
         control_audit "LOOP rejected in worktree mode"
@@ -1482,6 +1511,8 @@ control_start_plan() {
     local command="/plan"
     local preview
 
+    prompt="$(control_normalize_line_endings "$prompt")"
+
     if [[ "$SESSION_MODE" == "worktree" ]]; then
         echo "/plan is disabled in worktree mode because agent windows run codex exec and may exit."
         control_audit "PLAN rejected in worktree mode"
@@ -1510,6 +1541,7 @@ control_handle_queue_command() {
     local rest="$1"
     local sub queue_id spec index payload
 
+    rest="$(control_normalize_line_endings "$rest")"
     rest="$(control_ltrim "$rest")"
 
     if [[ "$rest" == \[* ]]; then
@@ -1706,6 +1738,7 @@ control_handle_command() {
     local line="$1"
     local parsed interval seconds prompt rest loop_id
 
+    line="$(control_normalize_line_endings "$line")"
     line="$(control_ltrim "$line")"
     [[ -n "$line" ]] || return 0
 
@@ -1750,13 +1783,13 @@ control_handle_command() {
         /permissions*)
             echo "usage: /permissions auto-review"
             ;;
-        /plan|/plan\ *|$'/plan\t'*)
+        /plan|/plan\ *|$'/plan\t'*|$'/plan\n'*)
             rest="${line#/plan}"
             rest="$(control_ltrim "$rest")"
             rest="$(control_collect_plan_prompt "$rest")"
             control_start_plan "$rest"
             ;;
-        /queue|/queue\ *|$'/queue\t'*)
+        /queue|/queue\ *|$'/queue\t'*|$'/queue\n'*)
             rest="${line#/queue}"
             control_handle_queue_command "$rest"
             ;;
