@@ -209,6 +209,39 @@ codex_release_asset_name() {
     esac
 }
 
+# Parse the installed Codex CLI version from `codex --version` output.
+# Expected format: "codex-cli 0.128.0" → "0.128.0".
+codex_installed_version() {
+    local version
+    version="$(codex --version 2>/dev/null)" || return 1
+    # Take the last whitespace-separated token (the version number).
+    version="${version##* }"
+    version="${version%%[[:space:]]*}"
+    [[ -n "$version" ]] || return 1
+    printf '%s\n' "$version"
+}
+
+# Strip the "rust-v" or "v" prefix from a release tag.
+# "rust-v0.130.0" → "0.130.0"; "v0.130.0" → "0.130.0".
+codex_tag_to_version() {
+    local tag="$1"
+    tag="${tag#rust-}"
+    tag="${tag#v}"
+    printf '%s\n' "$tag"
+}
+
+# True iff `codex` on PATH resolves to a file we placed in $BIN_DIR.
+# This protects npm/brew/system installs from being silently clobbered.
+codex_install_is_ours() {
+    local resolved
+    resolved="$(command -v codex 2>/dev/null)" || return 1
+    [[ -n "$resolved" ]] || return 1
+    if command -v readlink &>/dev/null; then
+        resolved="$(readlink -f "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+    fi
+    [[ "$resolved" == "$BIN_DIR/codex" ]]
+}
+
 # Resolve the tag name of the current latest stable Codex CLI release by
 # following the HTTP redirect from https://github.com/openai/codex/releases/latest.
 # GitHub's /releases/latest endpoint excludes prereleases and drafts.
@@ -529,6 +562,30 @@ if codex_cli_needs_install; then
         warn_codex_cli_failure
         ARCH="$(uname -m)"
         error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Try the standalone GitHub release or install Node.js/npm, then run: npm install -g @openai/codex"
+    fi
+elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
+    # Codex is installed and works — check for an upgrade.
+    INSTALLED_VERSION="$(codex_installed_version 2>/dev/null || true)"
+    TARGET_TAG="${CODEX_YOLO_CODEX_VERSION:-}"
+    if [[ -z "$TARGET_TAG" ]]; then
+        TARGET_TAG="$(codex_latest_stable_tag 2>/dev/null || true)"
+    fi
+    TARGET_VERSION=""
+    if [[ -n "$TARGET_TAG" ]]; then
+        TARGET_VERSION="$(codex_tag_to_version "$TARGET_TAG")"
+    fi
+
+    if [[ -n "$INSTALLED_VERSION" && -n "$TARGET_VERSION" && "$INSTALLED_VERSION" != "$TARGET_VERSION" ]]; then
+        if codex_install_is_ours; then
+            info "Upgrading Codex CLI: $INSTALLED_VERSION → $TARGET_VERSION"
+            if install_codex_release_binary; then
+                info "Codex CLI upgraded to $TARGET_VERSION"
+            else
+                warn "Codex CLI upgrade failed; keeping installed version $INSTALLED_VERSION"
+            fi
+        else
+            info "Codex CLI $TARGET_VERSION is available (installed: $INSTALLED_VERSION), but '$(command -v codex)' is not managed by this installer — skipping upgrade. Set CODEX_YOLO_SKIP_CODEX_UPGRADE=1 to silence."
+        fi
     fi
 fi
 
