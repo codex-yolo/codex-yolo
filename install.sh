@@ -209,15 +209,54 @@ codex_release_asset_name() {
     esac
 }
 
+# Resolve the tag name of the current latest stable Codex CLI release by
+# following the HTTP redirect from https://github.com/openai/codex/releases/latest.
+# GitHub's /releases/latest endpoint excludes prereleases and drafts.
+codex_latest_stable_tag() {
+    local headers location tag
+
+    command -v curl &>/dev/null || return 1
+
+    # -I prints headers; -L would follow redirects, but we want the FIRST hop's
+    # Location header (which points to /releases/tag/<TAG>).
+    headers="$(curl -fsSI --retry 2 "https://github.com/openai/codex/releases/latest" 2>/dev/null)" || return 1
+
+    location="$(printf '%s\n' "$headers" \
+        | awk 'BEGIN { IGNORECASE=1 } /^location:/ { print $2 }' \
+        | tr -d '\r' \
+        | tail -1)"
+    [[ -n "$location" ]] || return 1
+
+    tag="${location##*/tag/}"
+    tag="${tag%%[[:space:]]*}"
+    [[ -n "$tag" && "$tag" != "$location" ]] || return 1
+    printf '%s\n' "$tag"
+}
+
 install_codex_release_binary() {
-    local asset archive_url tmp_dir archive extracted
+    local asset tag archive_url tmp_dir archive extracted
 
     [[ "$IS_TERMUX" -eq 0 ]] || return 1
     command -v curl &>/dev/null || return 1
     command -v tar &>/dev/null || return 1
 
     asset="$(codex_release_asset_name "$OS" "$(uname -m)")" || return 1
-    archive_url="https://github.com/openai/codex/releases/latest/download/${asset}.tar.gz"
+
+    tag="${CODEX_YOLO_CODEX_VERSION:-}"
+    if [[ -n "$tag" ]]; then
+        info "Using pinned Codex CLI release: $tag"
+    elif tag="$(codex_latest_stable_tag)" && [[ -n "$tag" ]]; then
+        info "Latest stable Codex CLI release: $tag"
+    else
+        warn "Could not resolve latest stable Codex CLI tag — falling back to /releases/latest redirect"
+        tag=""
+    fi
+
+    if [[ -n "$tag" ]]; then
+        archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
+    else
+        archive_url="https://github.com/openai/codex/releases/latest/download/${asset}.tar.gz"
+    fi
     tmp_dir="$(mktemp -d)" || return 1
     archive="$tmp_dir/codex.tar.gz"
     extracted="$tmp_dir/$asset"
