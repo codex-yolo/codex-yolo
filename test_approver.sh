@@ -4109,7 +4109,7 @@ EOF
 
     local before after
     before="$(cat "$fake_home/.codex/config.toml")"
-    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 ensure_codex_config 2>/dev/null
     after="$(cat "$fake_home/.codex/config.toml")"
     rm -rf "$fake_home"
 
