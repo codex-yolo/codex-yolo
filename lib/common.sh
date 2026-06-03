@@ -490,6 +490,61 @@ codex_yolo_configure_tui_status_line() {
     log_info "Configured Codex TUI status line: $config_file"
 }
 
+# TOML block wiring Codex's `Stop` lifecycle hook to ring the terminal bell.
+# The Stop hook fires when the agent finishes its turn and returns control to
+# you. Under yolo mode the approver daemon auto-clears permission prompts, so
+# turn completion is the only moment your input is actually requested — we
+# deliberately do NOT hook PermissionRequest. The command writes BEL to the
+# agent's tmux pane (/dev/tty), falling back to stdout if there is no tty.
+# A literal (single-quoted) TOML string keeps the command verbatim; the shell
+# Codex spawns expands printf's \a to the bell byte.
+codex_yolo_stop_bell_block() {
+    cat <<'TOML'
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'printf "\a" > /dev/tty 2>/dev/null || printf "\a"'
+timeout = 30
+TOML
+}
+
+# True if the config already references a hooks.Stop table — array-of-tables
+# [[hooks.Stop]], table [hooks.Stop], or nested [hooks.Stop.hooks] (commented
+# lines and trailing comments ignored). When present we leave the user's hook
+# configuration entirely alone rather than risk a duplicate/conflicting table.
+codex_yolo_config_has_stop_hook() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+
+    awk '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            line = trim(line)
+            if (line ~ /^\[\[?[[:space:]]*hooks\.Stop([.]|[[:space:]]*\])/) { found = 1; exit }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$config_file"
+}
+
+# Append the Stop bell hook. As a TOML table block it is added at end of file,
+# where it cannot be absorbed into an earlier table. Idempotent; leaves any
+# pre-existing hooks.Stop configuration untouched.
+codex_yolo_configure_stop_bell() {
+    local config_file="$1"
+
+    if codex_yolo_config_has_stop_hook "$config_file"; then
+        return 0
+    fi
+
+    codex_yolo_stop_bell_block >> "$config_file" || return 1
+    log_info "Configured Codex turn-complete bell (hooks.Stop): $config_file"
+}
+
 # Ensure the Codex CLI config directory, config.toml, and codex-yolo defaults exist.
 # Does NOT override approval_policy (the daemon handles prompts at the terminal level).
 ensure_codex_config() {
@@ -514,4 +569,10 @@ TOML
     fi
 
     codex_yolo_configure_tui_status_line "$config_file"
+
+    # Ring the terminal bell when an agent finishes its turn. Opt out with
+    # CODEX_YOLO_NO_BELL=1 (mirrors the CODEX_YOLO_SKIP_* convention).
+    if [[ -z "${CODEX_YOLO_NO_BELL:-}" ]]; then
+        codex_yolo_configure_stop_bell "$config_file"
+    fi
 }
