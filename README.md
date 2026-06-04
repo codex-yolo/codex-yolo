@@ -235,13 +235,23 @@ full-access`, `--permissions auto-review`, or `--permissions none`. For
 standard interactive Auto-review sessions, `codex-yolo` also reconciles the TUI
 once at startup so `/permissions` shows `Auto-review (current)`.
 
+`codex-yolo` also configures a Codex `Stop` lifecycle hook in `~/.codex/config.toml`
+that rings the terminal bell when an agent finishes its turn, so you get an
+audible cue once the approver has cleared the prompts and control returns to you.
+On Codex `>=0.136.0`, a newly-added hook is gated behind a startup "Hooks need
+review" trust modal; `codex-yolo` pre-trusts its own bell hook deterministically
+(by the stable hash Codex derives from the hook definition) and the control pane
+also clears the modal at startup if it appears, so the bell runs without manual
+review. Any pre-existing `hooks.Stop` configuration is left untouched. Opt out of
+the bell entirely with `CODEX_YOLO_NO_BELL=1`.
+
 ## How it works
 
 1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
 2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop` and `/permissions auto-review`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
-   - Detects seven prompt styles (see below)
+   - Detects eight prompt styles (see below), including Codex's `Replace goal?` confirmation
    - Sends the confirm key via `tmux send-keys` to choose the first approval option (`Enter`, or `y` for prompts showing `Yes, proceed (y)`)
    - Applies a 2-second per-pane cooldown to prevent double-approvals
 4. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval and control event with timestamps. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
@@ -275,6 +285,12 @@ The approver requires the primary signal plus at least one secondary signal to f
 | Full access | `Enable full access?` | `Enter` → "Yes, continue anyway" |
 | Network/host | `Allow Codex to access <host>` | `Enter` → "Yes, just this once" |
 | MCP elicitation | `Yes, provide the requested info` | `Enter` → approve |
+| Replace goal | `Replace goal?` (from `/goal` via queue/loop) | `Enter` → "Replace current goal" |
+
+The `Replace goal?` prompt has its own three-signal detector (it requires
+`Replace goal?` plus `Replace current goal` plus `Keep the current goal` or
+`New objective:`) so it only fires on the genuine goal-replacement dialog and
+never on incidental "goal" text in agent output.
 
 ## File structure
 
@@ -316,10 +332,11 @@ bash test_approver.sh Concurrent
 ```
 
 The test suite covers:
-- Prompt detection for all six Codex CLI prompt types (command, edit, tool, trust, full access, network)
-- MCP elicitation prompt detection
+- Prompt detection for all six Codex CLI permission prompt types (command, edit, tool, trust, full access, network)
+- MCP elicitation and `Replace goal?` prompt detection
 - False positive resistance (code output, partial signals, missing context)
 - Cooldown logic, command construction, audit logging
+- Turn-complete bell hook configuration and pre-trust (and the startup hook-review modal handling)
 - End-to-end integration tests using real tmux sessions
 - Concurrent daemon isolation (no crosstalk between sessions)
 - Worktree creation, cleanup, conflict detection, and merge behavior
@@ -331,7 +348,8 @@ The test suite covers:
 - **Real-time conflict detection** — A background daemon polls `git merge-tree` across all branch pairs and logs conflicts as they emerge.
 - **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
 - **Convenience-first automation** — Standard sessions use Codex `--yolo`, so this is intended only for isolated environments where broad command execution is acceptable.
-- **Comprehensive detection logic** — Handles all six Codex CLI prompt types plus MCP elicitation using a multi-signal approach that minimizes false positives.
+- **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation and the `Replace goal?` confirmation, using a multi-signal approach that minimizes false positives.
+- **Turn-complete bell** — Configures (and pre-trusts) a Codex `Stop` hook so the terminal bell rings when an agent finishes its turn; opt out with `CODEX_YOLO_NO_BELL=1`.
 - **Reliability and traceability** — Per-pane cooldowns, detailed audit logging, and an extensive test suite emphasize reliability and traceability.
 - **No CLI patching or containerization** — Works entirely at the terminal level without modifying the Codex binary or wrapping it in containers.
 
