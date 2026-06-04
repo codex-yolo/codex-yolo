@@ -30,6 +30,7 @@ CONTROL_PERMISSIONS_BUSY_RETRY_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_BUSY_RETR
 CONTROL_PERMISSIONS_STARTUP_ATTEMPTS="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_ATTEMPTS:-1200}"
 CONTROL_PERMISSIONS_STARTUP_DELAY="${CODEX_YOLO_CONTROL_PERMISSIONS_STARTUP_DELAY:-0.5}"
 CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS="${CODEX_YOLO_CONTROL_PERMISSIONS_AUTO_REVIEW_RESET_STEPS:-6}"
+CONTROL_CODEX_TRUST_HOOKS="${CODEX_YOLO_CONTROL_CODEX_TRUST_HOOKS:-1}"
 CONTROL_PLAN_PASTE_GRACE="${CODEX_YOLO_CONTROL_PLAN_PASTE_GRACE:-0.5}"
 CONTROL_MULTILINE_PASTE_DELAY="${CODEX_YOLO_CONTROL_MULTILINE_PASTE_DELAY:-0.8}"
 CONTROL_QUEUE_WAIT_DELAY="${CODEX_YOLO_CONTROL_QUEUE_WAIT_DELAY:-1}"
@@ -513,6 +514,35 @@ control_codex_welcome_continue_visible() {
     ! control_codex_sign_in_visible "$tail_content"
 }
 
+# Codex >=0.136.0 shows a modal hook-trust review on startup when a new Stop/
+# Notification hook is configured. The modal grabs keyboard focus, so it must
+# be cleared before /permissions can be opened. The flow has two screens:
+#   * a top-level confirm menu ("Hooks need review" with "Trust all and
+#     continue" / "Continue without trusting" options), and
+#   * a per-hook detail view ("... needs review before it can run" /
+#     "Press t to trust; esc to go back").
+control_codex_hook_review_menu_visible() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 40)"
+    [[ "$tail_content" == *"Trust all and continue"* ]] || \
+    [[ "$tail_content" == *"Continue without trusting"* ]]
+}
+
+control_codex_hook_review_detail_visible() {
+    local content="$1"
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 40)"
+    [[ "$tail_content" == *"Press t to trust"* ]] || \
+    [[ "$tail_content" == *"needs review before it can run"* ]]
+}
+
+control_codex_hook_review_visible() {
+    local content="$1"
+    control_codex_hook_review_menu_visible "$content" || \
+    control_codex_hook_review_detail_visible "$content"
+}
+
 control_capture_target() {
     local target="$1"
     tmux capture-pane -p -t "$target" -S -100 2>/dev/null
@@ -730,6 +760,35 @@ control_wait_set_auto_review() {
                 echo "Codex sign-in required on $target_window; waiting for manual sign-in"
                 AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup sign-in required: $target_window attempt=$attempt"
                 sign_in_logged=1
+            fi
+            sleep "$delay" 2>/dev/null || true
+            continue
+        fi
+
+        if control_codex_hook_review_visible "$content"; then
+            if control_codex_hook_review_menu_visible "$content"; then
+                # Top-level confirm menu: items are
+                #   1. Review hooks
+                #   2. Trust all and continue
+                #   3. Continue without trusting (hooks won't run)
+                # Reset the cursor to the top (Up is clamped at item 1), then
+                # step down to the desired item and confirm with Enter.
+                if [[ "$CONTROL_CODEX_TRUST_HOOKS" == "1" ]]; then
+                    AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup trust-all hooks: $target_window attempt=$attempt"
+                    tmux send-keys -t "$target" Up Up Down Enter 2>/dev/null || true
+                else
+                    AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup continue without trusting: $target_window attempt=$attempt"
+                    tmux send-keys -t "$target" Up Up Down Down Enter 2>/dev/null || true
+                fi
+            elif [[ "$CONTROL_CODEX_TRUST_HOOKS" == "1" ]]; then
+                # Per-hook detail view: trust this hook, then loop back to the
+                # confirm menu on a later iteration.
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup trusting hook: $target_window attempt=$attempt"
+                tmux send-keys -t "$target" "t" 2>/dev/null || true
+            else
+                # Detail view while not trusting: back out to the confirm menu.
+                AUDIT_LOG="$audit_log" control_audit "PERMISSIONS auto-review startup leaving hook detail: $target_window attempt=$attempt"
+                tmux send-keys -t "$target" Escape 2>/dev/null || true
             fi
             sleep "$delay" 2>/dev/null || true
             continue

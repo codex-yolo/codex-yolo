@@ -490,6 +490,27 @@ codex_yolo_configure_tui_status_line() {
     log_info "Configured Codex TUI status line: $config_file"
 }
 
+# The exact bell command. Defined once so the hook block and the trust entry
+# below stay in lockstep — Codex derives the trust hash from this string, so
+# the two MUST match byte-for-byte.
+CODEX_YOLO_STOP_BELL_COMMAND='printf "\a" > /dev/tty 2>/dev/null || printf "\a"'
+
+# Codex >=0.136.0 gates every newly-seen hook behind an interactive "Hooks need
+# review" trust modal on startup; until it is cleared the hook never runs (and
+# under codex-yolo it also blocks the control pane's auto-review startup). The
+# trust is keyed by a sha256 the Codex CLI computes purely from the hook
+# definition (type/command/timeout) — verified IDENTICAL across machines and
+# config paths (e.g. /root/.codex vs /tmp/altcodex). So we can pre-trust the
+# bell hook deterministically and skip the modal entirely. The lookup key, by
+# contrast, embeds the absolute config path and the hook's position
+# (event:table_index:hook_index → "stop:0:0" for our single appended hook).
+#
+# IMPORTANT: this hash is tied to CODEX_YOLO_STOP_BELL_COMMAND above. If that
+# command ever changes, regenerate the hash by launching `codex` once, choosing
+# "Review hooks" → trusting the hook, and copying the resulting trusted_hash
+# from ~/.codex/config.toml.
+CODEX_YOLO_STOP_BELL_TRUSTED_HASH="sha256:b5db150194fd0e855b49e8991c090df2ef5808e8d4cf21aa53d0a15f79d13067"
+
 # TOML block wiring Codex's `Stop` lifecycle hook to ring the terminal bell.
 # The Stop hook fires when the agent finishes its turn and returns control to
 # you. Under yolo mode the approver daemon auto-clears permission prompts, so
@@ -499,15 +520,46 @@ codex_yolo_configure_tui_status_line() {
 # A literal (single-quoted) TOML string keeps the command verbatim; the shell
 # Codex spawns expands printf's \a to the bell byte.
 codex_yolo_stop_bell_block() {
-    cat <<'TOML'
+    cat <<TOML
 
 [[hooks.Stop]]
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'printf "\a" > /dev/tty 2>/dev/null || printf "\a"'
+command = '${CODEX_YOLO_STOP_BELL_COMMAND}'
 timeout = 30
 TOML
+}
+
+# Trust entry that marks the appended bell hook as already reviewed, so Codex
+# runs it without prompting. Mirrors exactly what Codex writes after a manual
+# "Review hooks" trust (a bare [hooks.state] table plus the per-hook subtable
+# with trusted_hash and no `enabled` key, which defaults to enabled/active).
+codex_yolo_stop_bell_trust_block() {
+    local config_file="$1"
+    cat <<TOML
+
+[hooks.state]
+
+[hooks.state."${config_file}:stop:0:0"]
+trusted_hash = "${CODEX_YOLO_STOP_BELL_TRUSTED_HASH}"
+TOML
+}
+
+# True if the config already carries our bell trust entry (matched by the
+# stable hash, which is independent of the config path).
+codex_yolo_config_has_stop_bell_trust() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    grep -qF "$CODEX_YOLO_STOP_BELL_TRUSTED_HASH" "$config_file"
+}
+
+# True if the config contains our exact bell command (i.e. the hook we own and
+# may therefore pre-trust). Avoids pre-trusting a position we don't control.
+codex_yolo_config_has_stop_bell_command() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    grep -qF "$CODEX_YOLO_STOP_BELL_COMMAND" "$config_file"
 }
 
 # True if the config already references a hooks.Stop table — array-of-tables
@@ -531,18 +583,28 @@ codex_yolo_config_has_stop_hook() {
     ' "$config_file"
 }
 
-# Append the Stop bell hook. As a TOML table block it is added at end of file,
-# where it cannot be absorbed into an earlier table. Idempotent; leaves any
-# pre-existing hooks.Stop configuration untouched.
+# Append the Stop bell hook and pre-trust it. As TOML table blocks they are
+# added at end of file, where they cannot be absorbed into an earlier table.
+# Both steps are independently idempotent: the hook is left untouched if any
+# hooks.Stop config already exists, and the trust entry is added only for our
+# own bell command when it is not yet trusted (so upgrades that already have the
+# hook but no trust entry get pre-trusted on the next run).
 codex_yolo_configure_stop_bell() {
     local config_file="$1"
 
-    if codex_yolo_config_has_stop_hook "$config_file"; then
-        return 0
+    if ! codex_yolo_config_has_stop_hook "$config_file"; then
+        codex_yolo_stop_bell_block >> "$config_file" || return 1
+        log_info "Configured Codex turn-complete bell (hooks.Stop): $config_file"
     fi
 
-    codex_yolo_stop_bell_block >> "$config_file" || return 1
-    log_info "Configured Codex turn-complete bell (hooks.Stop): $config_file"
+    # Pre-trust so Codex >=0.136.0 runs the bell without the startup hook-review
+    # modal (which otherwise also stalls the control pane). Only act on the hook
+    # we own, and only when it is not already trusted.
+    if codex_yolo_config_has_stop_bell_command "$config_file" \
+        && ! codex_yolo_config_has_stop_bell_trust "$config_file"; then
+        codex_yolo_stop_bell_trust_block "$config_file" >> "$config_file" || return 1
+        log_info "Pre-trusted Codex turn-complete bell hook: $config_file"
+    fi
 }
 
 # Ensure the Codex CLI config directory, config.toml, and codex-yolo defaults exist.
