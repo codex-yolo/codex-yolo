@@ -4125,6 +4125,132 @@ assert_ok "ensure_codex_config: inserts status line into existing TUI table" _te
 assert_ok "ensure_codex_config: preserves existing TUI status line" _test_config_preserves_existing_status_line
 
 ###############################################################################
+#              STOP BELL HOOK — install + pre-trust (Codex >=0.136)          #
+###############################################################################
+
+section "ensure_codex_config — Stop bell hook"
+
+_test_bell_installed() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"[[hooks.Stop]]"* ]] && \
+    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]]
+}
+
+# The bell must be pre-trusted (trusted_hash present) so Codex >=0.136 runs it
+# without the interactive "Hooks need review" startup modal.
+_test_bell_pretrusted() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local cfg="$fake_home/.codex/config.toml" content
+    content="$(cat "$cfg")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]] && \
+    [[ "$content" == *"[hooks.state.\"$cfg:stop:0:0\"]"* ]]
+}
+
+# The trust key must embed THIS config's absolute path (the hash is constant,
+# the key is path-specific), or Codex would re-prompt.
+_test_bell_trust_key_uses_config_path() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local cfg="$fake_home/.codex/config.toml"
+    local result=1
+    grep -qF "[hooks.state.\"$cfg:stop:0:0\"]" "$cfg" && result=0
+    rm -rf "$fake_home"
+    return $result
+}
+
+# Running twice must not duplicate the hook or the trust entry.
+_test_bell_idempotent() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local cfg="$fake_home/.codex/config.toml" hooks trust
+    hooks="$(grep -c '^\[\[hooks.Stop\]\]$' "$cfg")"
+    trust="$(grep -c 'trusted_hash' "$cfg")"
+    rm -rf "$fake_home"
+    [[ "$hooks" == "1" && "$trust" == "1" ]]
+}
+
+# Upgrade path: config already has our bell hook but no trust entry → the next
+# run pre-trusts it (so existing installs become active without a modal).
+_test_bell_pretrusts_existing_untrusted_hook() {
+    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
+    {
+        printf '# managed by codex-yolo\n\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\n'
+        printf "type = \"command\"\ncommand = '%s'\ntimeout = 30\n" "$CODEX_YOLO_STOP_BELL_COMMAND"
+    } > "$fake_home/.codex/config.toml"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+}
+
+# CODEX_YOLO_NO_BELL=1 opts out entirely: no hook, no trust entry.
+_test_bell_opt_out() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" != *"[[hooks.Stop]]"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+}
+
+# A user's own pre-existing Stop hook is left untouched, and we do NOT inject a
+# trust entry for a hook we don't own (our command isn't present).
+_test_bell_preserves_foreign_stop_hook() {
+    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'echo custom'
+timeout = 5
+EOF
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"echo custom"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+}
+
+assert_ok "stop bell: installs hooks.Stop bell hook" _test_bell_installed
+assert_ok "stop bell: pre-trusts the bell hook (no startup modal)" _test_bell_pretrusted
+assert_ok "stop bell: trust key embeds config path" _test_bell_trust_key_uses_config_path
+assert_ok "stop bell: idempotent (no duplicate hook/trust)" _test_bell_idempotent
+assert_ok "stop bell: pre-trusts pre-existing untrusted bell hook" _test_bell_pretrusts_existing_untrusted_hook
+assert_ok "stop bell: CODEX_YOLO_NO_BELL=1 opts out of hook + trust" _test_bell_opt_out
+assert_ok "stop bell: leaves a foreign Stop hook untrusted/untouched" _test_bell_preserves_foreign_stop_hook
+
+###############################################################################
+#         control pane — Codex hook-review modal detection (>=0.136)         #
+###############################################################################
+
+section "control pane — hook-review modal"
+
+_HOOK_DETAIL=$'  Stop hooks\n  1 hook needs review before it can run.\n\n  [!] Hook 1 \xc2\xb7 new\n  Press t to trust; esc to go back'
+_HOOK_MENU=$'  Hooks need review\n  1 hook is new or changed.\n\n\xe2\x80\xba 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won\x27t run)\n  Press enter to confirm or esc to go back'
+_HOOK_TUI=$'\xe2\x95\xad\xe2\x95\xae\n  >_ OpenAI Codex (v0.136.0)\n  model:     gpt-5.5   /model to change\n\xe2\x95\xb0\xe2\x95\xaf'
+
+assert_ok "hook modal: detects per-hook detail screen" \
+    control_codex_hook_review_detail_visible "$_HOOK_DETAIL"
+assert_ok "hook modal: detects top-level confirm menu" \
+    control_codex_hook_review_menu_visible "$_HOOK_MENU"
+assert_ok "hook modal: detail screen counts as hook-review" \
+    control_codex_hook_review_visible "$_HOOK_DETAIL"
+assert_ok "hook modal: menu screen counts as hook-review" \
+    control_codex_hook_review_visible "$_HOOK_MENU"
+assert_fail "hook modal: normal TUI is NOT a hook-review screen" \
+    control_codex_hook_review_visible "$_HOOK_TUI"
+assert_ok "hook modal: normal TUI still detected as TUI-visible" \
+    control_codex_tui_visible "$_HOOK_TUI"
+
+###############################################################################
 #                         AUDIT FUNCTION                                      #
 ###############################################################################
 
