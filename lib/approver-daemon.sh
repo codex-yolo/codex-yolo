@@ -301,6 +301,46 @@ detect_slash_command_prompt() {
     return 1
 }
 
+# Detect Codex CLI's "Replace goal?" confirmation, shown when a /goal command
+# (e.g. issued by the control pane's queue / loop) sets a new objective while a
+# goal is already active. Pattern:
+#   Replace goal?
+#   New objective: <objective text>
+#
+#   › 1. Replace current goal  Set the new objective and start it now
+#     2. Cancel                Keep the current goal
+#
+# The first option (Replace current goal) is pre-selected, so Enter confirms.
+# Three independent signals are required so this only fires on the genuine
+# goal-replacement prompt and never on incidental "goal" text in agent output.
+detect_goal_prompt() {
+    local content="$1"
+
+    local tail_content
+    tail_content="$(echo "$content" | tail -n 20)"
+
+    local has_question=0 has_replace=0 has_keep=0
+
+    if echo "$tail_content" | grep -qiE 'Replace goal\?'; then
+        has_question=1
+    fi
+
+    if echo "$tail_content" | grep -qiE 'Replace current goal'; then
+        has_replace=1
+    fi
+
+    if echo "$tail_content" | grep -qiE '(Keep the current goal|New objective:)'; then
+        has_keep=1
+    fi
+
+    if (( has_question && has_replace && has_keep )); then
+        echo "goal"
+        return 0
+    fi
+
+    return 1
+}
+
 approval_key_for_prompt() {
     local content="$1"
     local tail_content
@@ -374,6 +414,16 @@ main_loop() {
                     LAST_APPROVED["$pane"]="$(date +%s)"
                     audit "$pane" "slash-control"
                 fi
+                continue
+            fi
+
+            # Detect "Replace goal?" prompts (from /goal via queue/loop). The
+            # first option is pre-selected, so confirm with Enter. This prompt
+            # is specific enough to approve without a control-pane marker.
+            if pattern="$(detect_goal_prompt "$content")"; then
+                tmux send-keys -t "$pane" Enter 2>/dev/null || continue
+                LAST_APPROVED["$pane"]="$(date +%s)"
+                audit "$pane" "$pattern"
                 continue
             fi
 

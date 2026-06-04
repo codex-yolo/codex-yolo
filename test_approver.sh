@@ -118,7 +118,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^detect_goal_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -926,6 +926,57 @@ PANE
 
 assert_fail "Slash command prompt: ignores clear text without choices" \
     detect_slash_command_prompt "Use /clear later if you want a fresh context"
+
+###############################################################################
+#                 GOAL REPLACEMENT DETECTION (detect_goal_prompt)             #
+###############################################################################
+
+section "detect_goal_prompt — positive detection"
+
+assert_ok "Goal prompt: detects Replace goal confirmation" \
+    detect_goal_prompt "$(cat <<'PANE'
+  Replace goal?
+  New objective: win the first place in Track1 of https://www.kaggle.com/competitions/skill-lift, credentials are in .env file
+
+› 1. Replace current goal  Set the new objective and start it now
+  2. Cancel                Keep the current goal
+
+  Press enter to confirm or esc to go back
+PANE
+)"
+
+_test_goal_prompt_posix_locale() {
+    LC_ALL=C detect_goal_prompt "$(cat <<'PANE'
+  Replace goal?
+  New objective: win Track2
+
+› 1. Replace current goal  Set the new objective and start it now
+  2. Cancel                Keep the current goal
+PANE
+)"
+}
+
+assert_ok "Goal prompt: detects in POSIX locale" \
+    _test_goal_prompt_posix_locale
+
+section "detect_goal_prompt — negative (no false positives)"
+
+assert_fail "Goal prompt: ignores incidental goal text in output" \
+    detect_goal_prompt "The goal is to replace the current goal handler with a new objective."
+
+assert_fail "Goal prompt: ignores header without options" \
+    detect_goal_prompt "$(cat <<'PANE'
+  Replace goal?
+  New objective: something
+PANE
+)"
+
+assert_fail "Goal prompt: ignores options without the replace-goal header" \
+    detect_goal_prompt "$(cat <<'PANE'
+› 1. Replace current goal  Set the new objective and start it now
+  2. Cancel                Keep the current goal
+PANE
+)"
 
 ###############################################################################
 #              SLASH COMMAND PICKER DETECTION (detect_slash_picker)            #
