@@ -5,7 +5,7 @@
 # sequentially merges each worktree branch into the base branch, and
 # spawns a Codex agent to resolve any conflicts.
 #
-# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL] [--permissions PROFILE] [--no-codex-sandbox] [--fake-bwrap-dir DIR]
+# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL] [--effort LEVEL] [--permissions PROFILE] [--no-codex-sandbox] [--fake-bwrap-dir DIR]
 
 set -u
 
@@ -19,10 +19,12 @@ shift 2
 
 NO_CLEANUP=0
 MODEL=""
+EFFORT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cleanup)  NO_CLEANUP=1; shift ;;
         --model)       MODEL="$2"; shift 2 ;;
+        --effort)      EFFORT="$2"; shift 2 ;;
         --permissions)
             CODEX_YOLO_PERMISSION_PROFILE="$2"
             export CODEX_YOLO_PERMISSION_PROFILE
@@ -149,6 +151,9 @@ Do NOT modify files that are not in the conflicted list above."
     (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && \
         codex_cmd="$codex_cmd --dangerously-bypass-approvals-and-sandbox"
     [[ -n "$MODEL" ]] && codex_cmd="$codex_cmd --model $MODEL"
+    local effort_arg
+    effort_arg="$(codex_yolo_effort_config_arg "$EFFORT")"
+    [[ -n "$effort_arg" ]] && codex_cmd="$codex_cmd ${effort_arg%" "}"
 
     local cmd="cat '$tmpfile' | $codex_cmd -"
     cmd="$cmd ; touch '$resolve_done'"

@@ -62,6 +62,92 @@ check_prereqs() {
     return $missing
 }
 
+# ── best-model auto-selection ────────────────────────────────────────────────
+# When no -m/--model is given, the launcher picks the most capable model the
+# account can actually use: candidates are probed in order with a minimal
+# one-shot `codex exec` call, and the winner is cached so later launches skip
+# the probe. Probing beats reading the local model catalog — the catalog lists
+# what exists, not what this account/plan is currently allowed to use.
+CODEX_YOLO_MODEL_CANDIDATES="${CODEX_YOLO_MODEL_CANDIDATES:-gpt-5.6-sol gpt-5.6-terra gpt-5.5}"
+CODEX_YOLO_MODEL_CACHE_TTL="${CODEX_YOLO_MODEL_CACHE_TTL:-86400}"
+CODEX_YOLO_MODEL_PROBE_TIMEOUT="${CODEX_YOLO_MODEL_PROBE_TIMEOUT:-60}"
+
+model_cache_file() {
+    echo "$HOME/.codex-yolo/model-cache"
+}
+
+# Probe whether the account can use a model: one tiny non-interactive request.
+# read-only sandbox (nothing to execute), no git-repo requirement (the probe
+# may run from any directory), and reasoning effort pinned to low — the probe
+# answers "can this account use this model", so a config.toml effort level the
+# candidate does not support (e.g. ultra on gpt-5.5) must not fail it; low
+# also keeps the probe fast and cheap. Exit 0 = the model answered. Kept as
+# its own function so tests can stub it.
+codex_yolo_probe_model() {
+    local m="$1"
+    if command -v timeout &>/dev/null; then
+        timeout "$CODEX_YOLO_MODEL_PROBE_TIMEOUT" \
+            codex exec --skip-git-repo-check -s read-only -m "$m" \
+            -c 'model_reasoning_effort="low"' 'Reply with one word: ok' </dev/null &>/dev/null
+    else
+        codex exec --skip-git-repo-check -s read-only -m "$m" \
+            -c 'model_reasoning_effort="low"' 'Reply with one word: ok' </dev/null &>/dev/null
+    fi
+}
+
+# Print the best available model from CODEX_YOLO_MODEL_CANDIDATES (probed in
+# order, result cached for CODEX_YOLO_MODEL_CACHE_TTL seconds). Prints
+# nothing when no candidate works (auth/network down, or none permitted) —
+# the launcher then omits --model and Codex uses its own configured default.
+# Always returns 0 so `set -e` callers survive a failed resolution.
+resolve_best_model() {
+    local cache now
+    cache="$(model_cache_file)"
+    now="$(date +%s)"
+
+    if [[ -f "$cache" ]]; then
+        local cached mtime age
+        cached="$(head -1 "$cache" 2>/dev/null | tr -d '[:space:]')"
+        mtime="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)"
+        age=$(( now - mtime ))
+        # A cached winner is only valid while it is still one of the current
+        # candidates — otherwise a changed CODEX_YOLO_MODEL_CANDIDATES would
+        # be silently ignored until the TTL expires.
+        if [[ -n "$cached" ]] && (( age >= 0 && age < CODEX_YOLO_MODEL_CACHE_TTL )) \
+           && [[ " $CODEX_YOLO_MODEL_CANDIDATES " == *" $cached "* ]]; then
+            echo "$cached"
+            return 0
+        fi
+    fi
+
+    local m
+    for m in $CODEX_YOLO_MODEL_CANDIDATES; do
+        log_info "Probing model availability: $m"
+        if codex_yolo_probe_model "$m"; then
+            mkdir -p "$(dirname "$cache")" 2>/dev/null || true
+            printf '%s\n' "$m" > "$cache" 2>/dev/null || true
+            echo "$m"
+            return 0
+        fi
+        log_warn "Model unavailable: $m — trying next candidate"
+    done
+
+    log_warn "No candidate model available ($CODEX_YOLO_MODEL_CANDIDATES) — using Codex's default model"
+    return 0
+}
+
+# Render the -c override that sets the reasoning effort for an agent command.
+# Codex has no dedicated effort flag; the model_reasoning_effort config key is
+# the supported knob (unknown values are not fatal — Codex falls back to the
+# model's default — so validation in the launcher only warns).
+codex_yolo_effort_config_arg() {
+    local effort="${1:-}"
+    [[ -n "$effort" ]] || return 0
+
+    local level="${effort//\"/\\\"}"
+    printf -- "-c 'model_reasoning_effort=\"%s\"' " "$level"
+}
+
 # Return a writable directory for audit logs.
 # Prefers /tmp; falls back to ~/.codex-yolo/logs (e.g. Termux where /tmp is not writable).
 log_dir() {
@@ -583,6 +669,111 @@ codex_yolo_config_has_stop_hook() {
     ' "$config_file"
 }
 
+# ── PermissionRequest hook — off-screen approval-dialog markers ──────────────
+# Codex fires the PermissionRequest lifecycle hook whenever it shows an
+# approval dialog, with a JSON payload on stdin (hook_event_name, tool_name,
+# tool_input, ...). The command below records the dialog as a per-pane marker
+# file — <CODEX_YOLO_WAITING_DIR>/<TMUX_PANE>, line 1 an epoch timestamp,
+# line 2 the payload with newlines stripped — written atomically (temp file +
+# mv) so the approver daemon never reads a half-written marker. The daemon
+# uses these markers to recognize dialogs rendered off-screen (e.g. a diff
+# taller than the pane), which the capture-based detectors can never see.
+#
+# The command is deliberately STATIC — the session-specific marker directory
+# comes from the CODEX_YOLO_WAITING_DIR environment variable the launcher
+# sets on each agent pane, never from the command text — so its trust hash is
+# one constant and the hook can be pre-trusted exactly like the bell hook.
+# Outside a codex-yolo session (no CODEX_YOLO_WAITING_DIR, or no TMUX_PANE)
+# the hook exits 0 without writing anything, and it never surfaces errors
+# into the Codex session. Single-quoted TOML literal: the command must not
+# contain single quotes.
+CODEX_YOLO_PERMISSION_HOOK_COMMAND='p=$(cat 2>/dev/null); case "$p" in *PermissionRequest*) d="${CODEX_YOLO_WAITING_DIR:-}"; [ -n "$d" ] || exit 0; [ -n "${TMUX_PANE:-}" ] || exit 0; mkdir -p "$d" 2>/dev/null || exit 0; t="$d/.tmp.$$.$TMUX_PANE"; { date +%s; printf "%s" "$p" | tr -d "\r\n"; echo; } > "$t" 2>/dev/null && mv "$t" "$d/$TMUX_PANE" 2>/dev/null ;; esac; exit 0'
+
+# IMPORTANT: this hash is tied to CODEX_YOLO_PERMISSION_HOOK_COMMAND above
+# (Codex computes it purely from the hook definition — type/command/timeout —
+# so it is identical across machines and config paths, like the bell hash).
+# If the command or timeout ever changes, regenerate it by launching `codex`
+# once, choosing "Review hooks" → trusting the hook, and copying the
+# resulting trusted_hash from ~/.codex/config.toml.
+CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH="sha256:be2d5630ba8f23f4308f10b3263c1df99a7379e3fed5e844fa0f81bda5d7d638"
+
+codex_yolo_permission_hook_block() {
+    cat <<TOML
+
+[[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = '${CODEX_YOLO_PERMISSION_HOOK_COMMAND}'
+timeout = 30
+TOML
+}
+
+# Trust entry marking the appended PermissionRequest hook as already
+# reviewed. Mirrors what Codex writes after a manual "Review hooks" trust
+# (see codex_yolo_stop_bell_trust_block). The lookup key embeds the config
+# path and the hook's position (event:table_index:hook_index) — ours is the
+# first PermissionRequest group we append, hence :0:0.
+codex_yolo_permission_hook_trust_block() {
+    local config_file="$1"
+    cat <<TOML
+
+[hooks.state."${config_file}:permission_request:0:0"]
+trusted_hash = "${CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH}"
+TOML
+}
+
+codex_yolo_config_has_permission_hook_trust() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    grep -qF "$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH" "$config_file"
+}
+
+codex_yolo_config_has_permission_hook_command() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    grep -qF 'CODEX_YOLO_WAITING_DIR' "$config_file"
+}
+
+# True if the config already references a hooks.PermissionRequest table —
+# then we leave the user's hook configuration entirely alone (and our :0:0
+# trust key would target their hook, not ours).
+codex_yolo_config_has_permission_request_hook() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+
+    awk '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            line = trim(line)
+            if (line ~ /^\[\[?[[:space:]]*hooks\.PermissionRequest([.]|[[:space:]]*\])/) { found = 1; exit }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$config_file"
+}
+
+# Append the PermissionRequest marker hook and pre-trust it, mirroring
+# codex_yolo_configure_stop_bell: the hook is left untouched if any
+# hooks.PermissionRequest config already exists, and the trust entry is added
+# only for our own command when it is not yet trusted.
+codex_yolo_configure_permission_hook() {
+    local config_file="$1"
+
+    if ! codex_yolo_config_has_permission_request_hook "$config_file"; then
+        codex_yolo_permission_hook_block >> "$config_file" || return 1
+        log_info "Configured Codex approval-marker hook (hooks.PermissionRequest): $config_file"
+    fi
+
+    if codex_yolo_config_has_permission_hook_command "$config_file" \
+        && ! codex_yolo_config_has_permission_hook_trust "$config_file"; then
+        codex_yolo_permission_hook_trust_block "$config_file" >> "$config_file" || return 1
+        log_info "Pre-trusted Codex approval-marker hook: $config_file"
+    fi
+}
+
 # Append the Stop bell hook and pre-trust it. As TOML table blocks they are
 # added at end of file, where they cannot be absorbed into an earlier table.
 # Both steps are independently idempotent: the hook is left untouched if any
@@ -636,5 +827,13 @@ TOML
     # CODEX_YOLO_NO_BELL=1 (mirrors the CODEX_YOLO_SKIP_* convention).
     if [[ -z "${CODEX_YOLO_NO_BELL:-}" ]]; then
         codex_yolo_configure_stop_bell "$config_file"
+    fi
+
+    # Record approval dialogs as per-pane marker files so the approver daemon
+    # can recognize dialogs rendered off-screen (see approver-daemon.sh). The
+    # hook only acts inside codex-yolo sessions (it needs CODEX_YOLO_WAITING_DIR
+    # from the pane environment). Opt out with CODEX_YOLO_NO_PERMISSION_HOOK=1.
+    if [[ -z "${CODEX_YOLO_NO_PERMISSION_HOOK:-}" ]]; then
+        codex_yolo_configure_permission_hook "$config_file"
     fi
 }

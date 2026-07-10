@@ -118,7 +118,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
-eval "$(sed -n '/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^detect_goal_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
+eval "$(sed -n '/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -418,6 +418,74 @@ assert_eq "Approval key: classic prompt uses Enter" \
 
 assert_eq "Approval key: current proceed prompt uses y" \
     "y" "$(approval_key_for_prompt "$(make_current_proceed_command_prompt "ls /tmp")")"
+
+# The approval must always land on the approval option, even when the
+# selection marker was moved before the daemon started.
+assert_eq "Approval key: marker on numbered Yes → Enter" \
+    "Enter" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Would you like to run the following command?
+
+  $ git push
+
+› 1. Yes, and don't ask again for commands that start with `git push`
+  2. No, and tell Codex what to do differently
+PANE
+)")"
+
+assert_eq "Approval key: marker moved to No → send Yes option number" \
+    "1" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Would you like to run the following command?
+
+  $ git push
+
+  1. Yes, and don't ask again for commands that start with `git push`
+› 2. No, and tell Codex what to do differently
+PANE
+)")"
+
+assert_eq "Approval key: marker on Decline → send Run-the-tool option number" \
+    "1" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Approve app tool call?
+
+  database_query
+  may have side effects
+
+  1. Run the tool and continue.
+› 2. Decline this tool call and continue.
+PANE
+)")"
+
+assert_eq "Approval key: underscore marker on Yes → Enter" \
+    "Enter" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Would you like to make the following edits?
+
+  _ 1. Yes, just this once
+    2. No, and tell Codex what to do differently
+PANE
+)")"
+
+# Unnumbered menus offer no digit to jump with — fall back to Enter
+assert_eq "Approval key: unnumbered menu, marker on No → Enter fallback" \
+    "Enter" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Would you like to run the following command?
+
+    ls /tmp
+
+  Yes, just this once
+❯ No, and tell Codex what to do differently
+PANE
+)")"
+
+# A bare ">" is not a selection marker — prose/PS2 lines must not route to
+# the digit path
+assert_eq "Approval key: bare > blockquote does not trigger digit targeting" \
+    "Enter" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Would you like to run the following command?
+  > 2. some quoted numbered line
+  Yes, just this once
+  No, and tell Codex what to do differently
+PANE
+)")"
 
 ###############################################################################
 #                   FILE EDIT APPROVAL PROMPTS                                 #
@@ -752,6 +820,402 @@ assert_ok "Known limitation: code discussing prompts triggers detection" \
   PASSED
 PANE
 )"
+
+###############################################################################
+#          TALL DIALOGS — HEADER ABOVE THE TAIL WINDOW (WIDE WINDOW)          #
+###############################################################################
+
+section "detect_prompt — tall dialogs (wide window)"
+
+# A multi-line command echoed under the header pushes "Would you like to run
+# the following command?" far above the 25-line tail window; the option list
+# stays at the pane bottom. Modeled on a real capture (small pane, 15-line
+# command).
+_tall_dialog_prompt="$(cat <<'PANE'
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: command failed; retry without sandbox?
+
+  $ echo a1
+  echo a2
+  echo a3
+  echo a4
+  echo a5
+  echo a6
+  echo a7
+  echo a8
+  echo a9
+  echo a10
+  echo a11
+  echo a12
+  echo a13
+  echo a14
+  echo a15
+  echo a16
+  echo a17
+  echo a18
+  echo a19
+  echo a20
+  echo a21
+  echo a22
+  echo a23
+  echo a24
+  echo a25
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `echo a1` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+PANE
+)"
+
+assert_ok "Tall dialog: header above tail window is detected" \
+    detect_prompt "$_tall_dialog_prompt"
+
+_out="$(detect_prompt "$_tall_dialog_prompt")"
+assert_contains "Tall dialog: pattern includes question" "$_out" "question"
+
+assert_eq "Tall dialog: y shortcut still wins" \
+    "y" "$(approval_key_for_prompt "$_tall_dialog_prompt")"
+
+# A header merely *displayed* high on screen (cat of a fixture) with an idle
+# shell at the bottom must not fire: no approval option near the pane bottom.
+assert_fail "Tall dialog FP: displayed header with 25+ idle lines below" \
+    detect_prompt "$(printf '%s\n' \
+        '$ cat fixture.txt' \
+        '  Would you like to run the following command?' \
+        '  $ uname -a' \
+        '  Yes, just this once' \
+        '  No, and tell Codex what to do differently' \
+        "$(seq 6 32 | sed 's/^/line /')" \
+        '$')"
+
+# A header quoted mid-line in code output above the tail window is not
+# line-anchored — the wide window must not pair it with a stray option-like
+# line near the bottom. (Quoted prompts fully inside the tail remain a known
+# limitation of the tail path, asserted separately above.)
+assert_fail "Tall dialog FP: quoted header above tail, stray option at bottom" \
+    detect_prompt "$(printf '%s\n' \
+        '  assert text.includes("Would you like to run the following command?");' \
+        "$(seq 1 26 | sed 's/^/output line /')" \
+        '  the test replied Yes, just this once and moved on' \
+        '  PASSED')"
+
+###############################################################################
+#          QUESTION DIALOGS — RECOMMENDED OPTION AUTO-ANSWER                  #
+###############################################################################
+
+section "detect_question_prompt — recommended options"
+
+_question_marker_on_recommended="$(cat <<'PANE'
+  Question 1/2 (2 unanswered)
+  What form should the Snake game take?
+
+  › 1. Single HTML (Recommended)  A self-contained browser game with HTML, CSS, and JavaScript; easiest to run locally.
+    2. React app                  A small Vite/React project; better if you want component structure and future expansion.
+    3. Terminal game              A command-line Snake implementation; no browser UI.
+    4. None of the above          Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+PANE
+)"
+
+_question_marker_elsewhere="$(cat <<'PANE'
+  Question 1/1 (1 unanswered)
+  Which approach should the plan take?
+
+  › 1. Starter workflow             Plan code structure for a baseline and local workflow.
+    2. Implementation strategy (Recommended)  Plan a practical approach for building and testing.
+    3. None of the above            Optionally, add details in notes (tab).
+PANE
+)"
+
+_question_marker_on_other="$(cat <<'PANE'
+  Question 1/1 (1 unanswered)
+  Which approach should the plan take?
+
+    1. Implementation strategy (Recommended)  Plan a practical approach for building and testing.
+    2. Starter workflow             Plan code structure for a baseline and local workflow.
+  › 3. None of the above            Optionally, add details in notes (tab).
+PANE
+)"
+
+assert_ok "Question: recommended option with marker detected" \
+    detect_question_prompt "$_question_marker_on_recommended"
+
+assert_ok "Question: recommended option, marker elsewhere, detected" \
+    detect_question_prompt "$_question_marker_on_other"
+
+_out="$(detect_question_prompt "$_question_marker_on_recommended")"
+assert_eq "Question: pattern is question+recommended" \
+    "question+recommended" "$_out"
+
+assert_ok "Question: underscore marker rendering detected" \
+    detect_question_prompt "$(make_plan_submission_choice_prompt)"
+
+# No recommended label → leave for the user
+assert_fail "Question FP: menu without a recommended option is left alone" \
+    detect_question_prompt "$(cat <<'PANE'
+  Question 1/1 (1 unanswered)
+  Which approach should the plan take?
+
+  › 1. Starter workflow      Plan code structure for a baseline.
+    2. Implementation plan   Plan a practical build approach.
+PANE
+)"
+
+# Recommended mentioned in prose, no active menu → no detection
+assert_fail "Question FP: prose mentioning (Recommended) without a menu" \
+    detect_question_prompt "$(cat <<'PANE'
+  The docs say:
+  Use option 1. The single-HTML approach is the one labelled (Recommended)
+  in the setup guide, so go with that.
+PANE
+)"
+
+# Single option is not a menu
+assert_fail "Question FP: single numbered line is not a menu" \
+    detect_question_prompt "$(make_plan_choice_prompt)"
+
+# Permission prompts carry no recommended label → not a question
+assert_fail "Question FP: permission prompt is not a question" \
+    detect_question_prompt "$(make_command_prompt "ls /tmp")"
+
+# Lowercase "(recommended)" is a user-driven picker convention, not a
+# question dialog — the daemon must not fight it.
+assert_fail "Question FP: picker with lowercase (recommended)" \
+    detect_question_prompt "$(cat <<'PANE'
+  Select model
+
+  › 1. gpt-5.6-sol (recommended)   best for daily use
+    2. gpt-5.6-terra               balanced speed
+    3. gpt-5.5                     previous generation
+PANE
+)"
+
+# Checkbox rendering: toggling is needed before Enter — leave for the user.
+assert_fail "Question FP: multi-select checkboxes are left alone" \
+    detect_question_prompt "$(cat <<'PANE'
+  Which features do you want to enable?
+
+  › 1. [ ] Retry logic (Recommended)
+    2. [ ] Metrics export
+    3. [ ] Debug logging
+PANE
+)"
+
+# A markdown blockquote "> 1. ..." is not an active selection marker
+assert_fail "Question FP: markdown blockquote is not a menu marker" \
+    detect_question_prompt "$(cat <<'PANE'
+  The setup guide says:
+  > 1. Install the CLI first (Recommended)
+  > 2. Then authenticate
+  Follow those steps in order.
+PANE
+)"
+
+# A question dialog merely *displayed* high on screen (cat of a fixture) with
+# an idle shell at the bottom must not fire: no option line near the bottom.
+assert_fail "Question FP: displayed question menu with 25+ lines below" \
+    detect_question_prompt "$(printf '%s\n' \
+        '$ cat question-fixture.txt' \
+        '  Question 1/1 (1 unanswered)' \
+        '  › 1. Single HTML (Recommended)' \
+        '    2. React app' \
+        '    3. Terminal game' \
+        "$(seq 6 32 | sed 's/^/line /')" \
+        '$')"
+
+section "question_approval_key — recommended option targeting"
+
+assert_eq "Question key: marker on recommended → Enter" \
+    "Enter" "$(question_approval_key "$_question_marker_on_recommended")"
+
+assert_eq "Question key: marker on option 1, recommended is 2 → send 2" \
+    "2" "$(question_approval_key "$_question_marker_elsewhere")"
+
+assert_eq "Question key: marker on None-of-the-above, recommended is 1 → send 1" \
+    "1" "$(question_approval_key "$_question_marker_on_other")"
+
+assert_eq "Question key: underscore marker on recommended → Enter" \
+    "Enter" "$(question_approval_key "$(make_plan_submission_choice_prompt)")"
+
+###############################################################################
+#          HIDDEN-PROMPT MARKERS — freshness, gating, blind eligibility       #
+###############################################################################
+
+section "notify_marker_fresh — hidden-prompt marker validity"
+
+_marker_dir="$(mktemp -d)"
+
+_notify_fresh() {  # $1 = pane
+    CODEX_YOLO_WAITING_DIR="$_marker_dir" notify_marker_fresh "$1"
+}
+_notify_clear() {  # $1 = pane
+    CODEX_YOLO_WAITING_DIR="$_marker_dir" clear_notify_marker "$1"
+}
+
+assert_fail "notify marker: missing marker is not fresh" _notify_fresh '%1'
+
+date +%s > "$_marker_dir/%1"
+assert_ok "notify marker: current timestamp is fresh" _notify_fresh '%1'
+
+echo "$(( $(date +%s) - NOTIFY_MARKER_TTL - 10 ))" > "$_marker_dir/%2"
+assert_fail "notify marker: expired marker is not fresh" _notify_fresh '%2'
+assert_fail "notify marker: expired marker is removed" test -f "$_marker_dir/%2"
+
+echo "not-a-timestamp" > "$_marker_dir/%3"
+assert_fail "notify marker: malformed marker is not fresh" _notify_fresh '%3'
+assert_fail "notify marker: malformed marker is removed" test -f "$_marker_dir/%3"
+
+: > "$_marker_dir/%4"
+assert_fail "notify marker: empty marker is not fresh" _notify_fresh '%4'
+
+date +%s > "$_marker_dir/%5"
+_notify_clear '%5'
+assert_fail "notify marker: clear_notify_marker removes it" test -f "$_marker_dir/%5"
+
+# Without an override or AUDIT_LOG the helpers refuse quietly
+assert_fail "notify marker: no waiting dir configured" \
+    env -u CODEX_YOLO_WAITING_DIR -u AUDIT_LOG bash -c '
+        source "'"$SCRIPT_DIR"'/lib/common.sh"
+        eval "$(sed -n "/^NOTIFY_MARKER_TTL=/p; /^notify_waiting_dir()/,/^}/p; /^notify_marker_fresh()/,/^}/p" "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+        notify_marker_fresh "%1"
+    '
+
+# Two-line markers (timestamp + payload) as the real PermissionRequest hook
+# writes them: the freshness check still reads the timestamp from line 1.
+_write_marker() {  # $1 = pane, $2 = tool_name
+    printf '%s\n{"hook_event_name":"PermissionRequest","cwd":"/home/user/project","model":"gpt-5.5","permission_mode":"default","tool_name":"%s","tool_input":{"command":"uname -a"}}\n' \
+        "$(date +%s)" "$2" > "$_marker_dir/$1"
+}
+
+_notify_tool() { CODEX_YOLO_WAITING_DIR="$_marker_dir" notify_marker_tool "$1"; }
+_notify_ts() { CODEX_YOLO_WAITING_DIR="$_marker_dir" notify_marker_ts "$1"; }
+_notify_blindable() { CODEX_YOLO_WAITING_DIR="$_marker_dir" notify_marker_blindable "$1"; }
+
+_write_marker '%6' 'Bash'
+assert_ok "notify marker: two-line marker is fresh" _notify_fresh '%6'
+_ts6="$(_notify_ts '%6')"
+assert_ok "notify marker: two-line ts is numeric" bash -c "[[ '$_ts6' =~ ^[0-9]+\$ ]]"
+assert_contains "notify marker: tool name extracted from line 2" \
+    "$(_notify_tool '%6')" '"tool_name":"Bash"'
+
+section "notify_marker_blindable — plain-tool vs reserved dialogs"
+
+# Plain shell/edit approval → blind-answerable
+_write_marker '%20' 'Bash'
+assert_ok "blindable: Bash tool approval" _notify_blindable '%20'
+
+_write_marker '%21' 'apply_patch'
+assert_ok "blindable: apply_patch approval" _notify_blindable '%21'
+
+# Plan-flavored tool names are reserved for the user
+_write_marker '%22' 'ExitPlanMode'
+assert_fail "blindable: plan tool is gated" _notify_blindable '%22'
+
+# Question / user-input tools are reserved for the user
+_write_marker '%23' 'request_user_input'
+assert_fail "blindable: user-input tool is gated" _notify_blindable '%23'
+
+# A cwd/path containing 'plan' must NOT gate a plain tool dialog — only the
+# tool_name field is inspected
+printf '%s\n{"hook_event_name":"PermissionRequest","cwd":"/home/user/plan-app","tool_name":"Bash","tool_input":{"command":"cat plan.md"}}\n' \
+    "$(date +%s)" > "$_marker_dir/%24"
+assert_ok "blindable: 'plan' in cwd/command does not gate (tool_name only)" _notify_blindable '%24'
+
+# Missing tool_name fails closed — no blind answer
+printf '%s\n' "$(date +%s)" > "$_marker_dir/%25"
+assert_fail "blindable: missing payload fails closed" _notify_blindable '%25'
+
+printf '%s\n{"hook_event_name":"PermissionRequest","cwd":"/tmp"}\n' \
+    "$(date +%s)" > "$_marker_dir/%26"
+assert_fail "blindable: payload without tool_name fails closed" _notify_blindable '%26'
+
+rm -rf "$_marker_dir"
+
+section "hidden_candidate — blind-Enter eligibility"
+
+# The off-screen-dialog state: raw command/diff text at the pane bottom, no
+# composer marker and no box chrome
+assert_ok "hidden candidate: command-filled pane qualifies" \
+    hidden_candidate "$(cat <<'PANE'
+  $ echo a1
+  echo a2
+  echo a3
+  echo a4
+  echo a5
+  echo a6
+  echo a7
+  echo a8
+PANE
+)"
+
+# The idle composer draws its › prompt — never type into it blindly
+assert_fail "hidden candidate: idle composer is excluded" \
+    hidden_candidate "$(cat <<'PANE'
+  Some earlier output.
+
+› Summarize recent commits
+  gpt-5.5 low fast · ~/git/project
+PANE
+)"
+
+# A fully rendered dialog is handled by the visual detectors instead
+assert_fail "hidden candidate: rendered dialog is excluded" \
+    hidden_candidate "$(cat <<'PANE'
+  Would you like to run the following command?
+
+  $ uname -a
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)
+PANE
+)"
+
+# Boxed UI (welcome banner chrome) is excluded too
+assert_fail "hidden candidate: box chrome is excluded" \
+    hidden_candidate "$(cat <<'PANE'
+ ╭───────────────────────────────╮
+ │ >_ OpenAI Codex (v0.142.5)    │
+ ╰───────────────────────────────╯
+PANE
+)"
+
+# Composer/box chrome far above the tail window does not disqualify the pane
+assert_ok "hidden candidate: old chrome above tail window ignored" \
+    hidden_candidate "$(printf '╰──────╯\n› old composer line\n%s\n' "$(seq 1 20 | sed 's/^/+ diff line /')")"
+
+section "send_should_skip / note_key_sent — static-pane send cap"
+
+LAST_SENT_HASH=() SEND_STREAK=()
+assert_fail "send cap: empty hash never skips" send_should_skip '%9' ''
+assert_fail "send cap: first sighting does not skip" send_should_skip '%9' 'hash-a'
+
+_i=0
+while (( _i < SEND_STREAK_CAP )); do
+    note_key_sent '%9' 'hash-a'
+    _i=$((_i + 1))
+done
+assert_ok "send cap: skips after cap sends of identical content" \
+    send_should_skip '%9' 'hash-a'
+assert_fail "send cap: different content resets the skip" \
+    send_should_skip '%9' 'hash-b'
+note_key_sent '%9' 'hash-b'
+assert_fail "send cap: streak restarts after content change" \
+    send_should_skip '%9' 'hash-b'
+LAST_SENT_HASH=() SEND_STREAK=()
+
+section "audit_event — non-approval audit lines"
+
+_audit_tmp="$(mktemp)"
+AUDIT_LOG="$_audit_tmp" audit_event '%5' 'HIDDEN-PROMPT nudge 1/2'
+assert_contains "audit_event: line lands in audit log" \
+    "$(cat "$_audit_tmp")" "HIDDEN-PROMPT nudge 1/2 pane=%5"
+rm -f "$_audit_tmp"
 
 ###############################################################################
 #              PLAN APPROVAL PROMPT DETECTION                                  #
@@ -1328,6 +1792,33 @@ assert_eq "build_agent_cmd: forced Codex sandbox uses full-auto" \
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 
+# Reasoning effort rides along as a -c override, after the model
+_out="$(build_agent_cmd "gpt-5.6-sol" "fix the bug" "xhigh")"
+assert_eq "build_agent_cmd: effort after model" \
+    "codex --yolo --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+
+_out="$(build_agent_cmd "" "task" "max")"
+assert_eq "build_agent_cmd: effort without model" \
+    "codex --yolo -c 'model_reasoning_effort=\"max\"' 'task'" "$_out"
+
+_out="$(build_agent_cmd "gpt-5.5" "" "xhigh")"
+assert_eq "build_agent_cmd: effort in interactive mode" \
+    "codex --yolo --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'" "$_out"
+
+_out="$(build_agent_cmd "gpt-5.5" "task" "")"
+assert_eq "build_agent_cmd: empty effort omits the override" \
+    "codex --yolo --model gpt-5.5 'task'" "$_out"
+
+# The waiting dir rides along as a pane-environment assignment so the
+# PermissionRequest hook (static command, see common.sh) can find it
+_out="$(build_agent_cmd "gpt-5.5" "task" "xhigh" "/tmp/cy.log.waiting")"
+assert_eq "build_agent_cmd: waiting dir env + model + effort" \
+    "CODEX_YOLO_WAITING_DIR='/tmp/cy.log.waiting' codex --yolo --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'task'" "$_out"
+
+_out="$(build_agent_cmd "" "" "" "/tmp/it's.waiting")"
+assert_eq "build_agent_cmd: waiting dir single-quote escaping" \
+    "CODEX_YOLO_WAITING_DIR='/tmp/it'\\''s.waiting' codex --yolo" "$_out"
+
 section "build_exec_agent_cmd — Worktree command construction"
 
 _out="$(build_exec_agent_cmd "" "fix the bug")"
@@ -1365,6 +1856,15 @@ assert_eq "build_exec_agent_cmd: forced Codex sandbox keeps sandboxed exec" \
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
+
+_out="$(build_exec_agent_cmd "gpt-5.5" "fix the bug" "xhigh")"
+assert_eq "build_exec_agent_cmd: effort after model" \
+    "codex exec --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+
+_out="$(build_exec_agent_cmd "" "task" "")"
+assert_eq "build_exec_agent_cmd: empty effort omits the override" \
+    "codex exec 'task'" "$_out"
+
 CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 CODEX_YOLO_PERMISSION_PROFILE=""
@@ -4160,7 +4660,7 @@ EOF
 
     local before after
     before="$(cat "$fake_home/.codex/config.toml")"
-    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 ensure_codex_config 2>/dev/null
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 CODEX_YOLO_NO_PERMISSION_HOOK=1 ensure_codex_config 2>/dev/null
     after="$(cat "$fake_home/.codex/config.toml")"
     rm -rf "$fake_home"
 
@@ -4214,16 +4714,19 @@ _test_bell_trust_key_uses_config_path() {
     return $result
 }
 
-# Running twice must not duplicate the hook or the trust entry.
+# Running twice must not duplicate the hook or the trust entry. (The config
+# carries two trusted hashes total: the bell's and the permission-marker
+# hook's — each exactly once.)
 _test_bell_idempotent() {
     local fake_home; fake_home="$(mktemp -d)"
     HOME="$fake_home" ensure_codex_config 2>/dev/null
     HOME="$fake_home" ensure_codex_config 2>/dev/null
-    local cfg="$fake_home/.codex/config.toml" hooks trust
+    local cfg="$fake_home/.codex/config.toml" hooks bell_trust perm_trust
     hooks="$(grep -c '^\[\[hooks.Stop\]\]$' "$cfg")"
-    trust="$(grep -c 'trusted_hash' "$cfg")"
+    bell_trust="$(grep -c "$CODEX_YOLO_STOP_BELL_TRUSTED_HASH" "$cfg")"
+    perm_trust="$(grep -c "$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH" "$cfg")"
     rm -rf "$fake_home"
-    [[ "$hooks" == "1" && "$trust" == "1" ]]
+    [[ "$hooks" == "1" && "$bell_trust" == "1" && "$perm_trust" == "1" ]]
 }
 
 # Upgrade path: config already has our bell hook but no trust entry → the next
@@ -4277,6 +4780,222 @@ assert_ok "stop bell: idempotent (no duplicate hook/trust)" _test_bell_idempoten
 assert_ok "stop bell: pre-trusts pre-existing untrusted bell hook" _test_bell_pretrusts_existing_untrusted_hook
 assert_ok "stop bell: CODEX_YOLO_NO_BELL=1 opts out of hook + trust" _test_bell_opt_out
 assert_ok "stop bell: leaves a foreign Stop hook untrusted/untouched" _test_bell_preserves_foreign_stop_hook
+
+###############################################################################
+#     PERMISSION-MARKER HOOK — install + pre-trust + hook command behavior    #
+###############################################################################
+
+section "ensure_codex_config — PermissionRequest marker hook"
+
+_test_perm_hook_installed() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"[[hooks.PermissionRequest]]"* ]] && \
+    [[ "$content" == *"CODEX_YOLO_WAITING_DIR"* ]]
+}
+
+_test_perm_hook_pretrusted() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local cfg="$fake_home/.codex/config.toml" content
+    content="$(cat "$cfg")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH"* ]] && \
+    [[ "$content" == *"[hooks.state.\"$cfg:permission_request:0:0\"]"* ]]
+}
+
+_test_perm_hook_idempotent() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local cfg="$fake_home/.codex/config.toml" hooks trust
+    hooks="$(grep -c '^\[\[hooks.PermissionRequest\]\]$' "$cfg")"
+    trust="$(grep -c "$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH" "$cfg")"
+    rm -rf "$fake_home"
+    [[ "$hooks" == "1" && "$trust" == "1" ]]
+}
+
+_test_perm_hook_opt_out() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" CODEX_YOLO_NO_PERMISSION_HOOK=1 ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" != *"[[hooks.PermissionRequest]]"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH"* ]]
+}
+
+# A user's own PermissionRequest hook is left untouched, and we do NOT inject
+# a trust entry for a hook we don't own (:0:0 would target theirs).
+_test_perm_hook_preserves_foreign_hook() {
+    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+[[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = 'echo custom-perm'
+timeout = 5
+EOF
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"echo custom-perm"* ]] && \
+    [[ "$content" != *"CODEX_YOLO_WAITING_DIR"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH"* ]]
+}
+
+# The full config (TUI table + both hooks + both trust entries) must stay
+# valid TOML — a parse error would brick every codex launch.
+_test_perm_hook_config_valid_toml() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -c 'import tomllib' 2>/dev/null || return 0
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local result=0
+    python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' \
+        "$fake_home/.codex/config.toml" || result=1
+    rm -rf "$fake_home"
+    return $result
+}
+
+assert_ok "perm hook: installs hooks.PermissionRequest marker hook" _test_perm_hook_installed
+assert_ok "perm hook: pre-trusts the marker hook (no startup modal)" _test_perm_hook_pretrusted
+assert_ok "perm hook: idempotent (no duplicate hook/trust)" _test_perm_hook_idempotent
+assert_ok "perm hook: CODEX_YOLO_NO_PERMISSION_HOOK=1 opts out" _test_perm_hook_opt_out
+assert_ok "perm hook: leaves a foreign PermissionRequest hook untouched" _test_perm_hook_preserves_foreign_hook
+assert_ok "perm hook: resulting config parses as TOML" _test_perm_hook_config_valid_toml
+
+section "permission-marker hook command — marker writes"
+
+# Exercise the hook command exactly like Codex does: JSON payload on stdin,
+# TMUX_PANE + CODEX_YOLO_WAITING_DIR in the environment.
+_run_perm_hook_cmd() {  # $1 = stdin payload, $2 = TMUX_PANE, $3 = waiting dir
+    printf '%s' "$1" | TMUX_PANE="$2" CODEX_YOLO_WAITING_DIR="$3" \
+        sh -c "$CODEX_YOLO_PERMISSION_HOOK_COMMAND"
+}
+
+_perm_payload='{"hook_event_name":"PermissionRequest","model":"gpt-5.5","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"uname -a"}}'
+
+_hook_tmp="$(mktemp -d)"
+
+assert_ok "perm hook cmd: PermissionRequest payload exits 0" \
+    _run_perm_hook_cmd "$_perm_payload" '%7' "$_hook_tmp"
+assert_ok "perm hook cmd: writes marker named after pane" \
+    test -f "$_hook_tmp/%7"
+assert_ok "perm hook cmd: marker line 1 holds an epoch timestamp" \
+    bash -c "head -n1 '$_hook_tmp/%7' | grep -qE '^[0-9]+\$'"
+assert_ok "perm hook cmd: marker line 2 holds the payload" \
+    grep -q '"tool_name":"Bash"' "$_hook_tmp/%7"
+# No temp file is left behind by the atomic write
+assert_eq "perm hook cmd: atomic write leaves only the pane marker" \
+    "%7" "$(ls "$_hook_tmp")"
+
+# Non-PermissionRequest payloads (defensive: the hook is registered only for
+# PermissionRequest, but must not write markers if ever fed anything else)
+rm -f "$_hook_tmp"/* 2>/dev/null
+assert_ok "perm hook cmd: Stop payload exits 0" \
+    _run_perm_hook_cmd '{"hook_event_name":"Stop","last_assistant_message":"done"}' '%7' "$_hook_tmp"
+assert_fail "perm hook cmd: Stop payload writes no marker" \
+    test -f "$_hook_tmp/%7"
+
+# Outside a codex-yolo session there is no waiting dir — still exits 0
+# (hooks must not surface errors into the Codex session).
+rm -f "$_hook_tmp"/* 2>/dev/null
+assert_ok "perm hook cmd: no CODEX_YOLO_WAITING_DIR exits 0" \
+    _run_perm_hook_cmd "$_perm_payload" '%7' ''
+assert_eq "perm hook cmd: no CODEX_YOLO_WAITING_DIR writes nothing" \
+    "" "$(ls "$_hook_tmp" 2>/dev/null)"
+
+# Outside tmux there is no pane to mark — still exits 0.
+assert_ok "perm hook cmd: no TMUX_PANE exits 0" \
+    _run_perm_hook_cmd "$_perm_payload" '' "$_hook_tmp"
+assert_eq "perm hook cmd: no TMUX_PANE writes nothing" \
+    "" "$(ls "$_hook_tmp" 2>/dev/null)"
+
+# The command must stay a valid single-quoted TOML literal: single quotes
+# inside it would truncate the string and corrupt the config.
+assert_fail "perm hook cmd: contains no single quotes (TOML literal safety)" \
+    bash -c "printf '%s' \"\$CODEX_YOLO_PERMISSION_HOOK_COMMAND\" | grep -qF \"'\""
+
+rm -rf "$_hook_tmp"
+
+###############################################################################
+#                 BEST-MODEL AUTO-SELECTION (resolve_best_model)              #
+###############################################################################
+
+section "resolve_best_model — best-model auto-selection"
+
+_rbm_tmp="$(mktemp -d)"
+# Pin the knobs this section asserts against (a user-exported
+# CODEX_YOLO_MODEL_CANDIDATES would otherwise change candidate order and
+# fail correct code); restored after the section.
+_rbm_prev_candidates="$CODEX_YOLO_MODEL_CANDIDATES"
+_rbm_prev_ttl="$CODEX_YOLO_MODEL_CACHE_TTL"
+CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+CODEX_YOLO_MODEL_CACHE_TTL=86400
+model_cache_file() { echo "$_rbm_tmp/model-cache"; }
+
+# Probe stub: a model is "available" iff listed in _RBM_AVAILABLE
+codex_yolo_probe_model() {
+    [[ " $_RBM_AVAILABLE " == *" $1 "* ]]
+}
+
+_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: picks gpt-5.6-sol when available" "gpt-5.6-sol" "$_out"
+
+assert_eq "resolve_best_model: caches the winner" \
+    "gpt-5.6-sol" "$(head -1 "$_rbm_tmp/model-cache")"
+
+_RBM_AVAILABLE="gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: fresh cache short-circuits probing" \
+    "gpt-5.6-sol" "$_out"
+
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.6-terra gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: falls back to terra when sol unavailable" "gpt-5.6-terra" "$_out"
+
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: falls back to gpt-5.5" "gpt-5.5" "$_out"
+
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE=""
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: empty when no candidate works" "" "$_out"
+
+assert_ok "resolve_best_model: returns 0 even when no candidate works" \
+    resolve_best_model 2>/dev/null
+
+# An expired cache is re-probed
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.5"
+resolve_best_model >/dev/null 2>&1   # caches gpt-5.5
+CODEX_YOLO_MODEL_CACHE_TTL=0
+_RBM_AVAILABLE="gpt-5.6-sol"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: expired cache re-probes" "gpt-5.6-sol" "$_out"
+CODEX_YOLO_MODEL_CACHE_TTL=86400
+
+# A cached model that is no longer in the candidate list is discarded —
+# changing CODEX_YOLO_MODEL_CANDIDATES takes effect immediately
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+resolve_best_model >/dev/null 2>&1   # caches gpt-5.6-sol
+CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-terra gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: cached model outside candidates re-probes" "gpt-5.6-terra" "$_out"
+CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+
+rm -rf "$_rbm_tmp"
+unset _RBM_AVAILABLE
+CODEX_YOLO_MODEL_CANDIDATES="$_rbm_prev_candidates"
+CODEX_YOLO_MODEL_CACHE_TTL="$_rbm_prev_ttl"
 
 ###############################################################################
 #         control pane — Codex hook-review modal detection (>=0.136)         #
@@ -4571,22 +5290,38 @@ assert_fail "launcher: -f nonexistent file fails" \
 # So instead of checking the exit code, verify the session was actually created.
 _test_no_args() {
     local before
-    before="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
+    # The launcher runs with TMUX unset (see below), so it talks to the
+    # *default-socket* tmux server — which is a different server when this
+    # test itself runs inside tmux on a named socket. Every tmux call here
+    # must also drop TMUX so the checks and cleanup hit the same server the
+    # launcher used; otherwise the test looks for the session on the wrong
+    # server and leaks it (plus a live codex agent) on the default one.
+    before="$(env -u TMUX tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
+    # Isolate HOME with a pre-seeded fresh model cache: the launcher's
+    # resolve_best_model then cache-hits instantly instead of issuing real
+    # (billed) `codex exec` probes and writing the user's real
+    # ~/.codex-yolo/model-cache; ensure_codex_config writes land in the
+    # throwaway HOME too.
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex-yolo"
+    echo "gpt-5.5" > "$fake_home/.codex-yolo/model-cache"
     # Unset TMUX so the launcher uses "tmux attach" (which harmlessly fails
     # when stdout is redirected) instead of "tmux switch-client" (which would
     # yank the user's current tmux client to the new session).
-    env -u TMUX bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1 || true
+    env -u TMUX HOME="$fake_home" bash "$SCRIPT_DIR/codex-yolo" >/dev/null 2>&1 || true
+    rm -rf "$fake_home"
     # Check that a new codex-yolo-* session was created
     local after found=0
-    after="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
+    after="$(env -u TMUX tmux list-sessions -F '#{session_name}' 2>/dev/null | sort || true)"
     local s
     for s in $(comm -13 <(echo "$before") <(echo "$after") | grep '^codex-yolo-' || true); do
         found=1
-        tmux kill-session -t "$s" 2>/dev/null || true
+        env -u TMUX tmux kill-session -t "$s" 2>/dev/null || true
     done
     # Also clean up any stragglers
-    for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^codex-yolo-' || true); do
-        echo "$before" | grep -qxF "$s" || tmux kill-session -t "$s" 2>/dev/null || true
+    for s in $(env -u TMUX tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^codex-yolo-' || true); do
+        echo "$before" | grep -qxF "$s" || env -u TMUX tmux kill-session -t "$s" 2>/dev/null || true
     done
     (( found ))
 }
@@ -4752,7 +5487,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^AUDIT_LOG=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -4789,7 +5524,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -4827,7 +5562,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -4863,7 +5598,7 @@ PROMPT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 2 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -4900,7 +5635,7 @@ OUTPUT
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2
@@ -5154,6 +5889,9 @@ _run_integ_plan_choice_without_control_marker() {
 }
 assert_ok "Integration: direct numbered Solution plan prompt is not auto-approved" _run_integ_plan_choice_without_control_marker
 
+# A multi-option question carrying a "(Recommended)" option is auto-answered
+# even without a control-pane marker — the recommended-question path picks it
+# up (marker sits on the recommended option, so Enter submits it).
 _run_integ_plan_submission_choice_without_control_marker() {
     _integ_cleanup
     local audit_tmp result
@@ -5172,9 +5910,346 @@ _run_integ_plan_submission_choice_without_control_marker() {
     rm -f "$audit_tmp" "${audit_tmp}.plan-approval"
     _integ_cleanup
 
-    [[ "$result" != *"APPROVED"* ]]
+    [[ "$result" == *"question+recommended"* ]]
 }
-assert_ok "Integration: direct numbered Prepare only submission prompt is not auto-approved" _run_integ_plan_submission_choice_without_control_marker
+assert_ok "Integration: direct numbered Prepare only submission prompt is auto-answered (Recommended)" _run_integ_plan_submission_choice_without_control_marker
+
+# ── Integration: tall dialog (header above the tail window) ──────────────────
+
+_run_integ_tall_dialog() {
+    _integ_cleanup
+    local audit_tmp fixture_tmp
+    audit_tmp="$(mktemp)"
+    fixture_tmp="$(mktemp)"
+
+    {
+        printf '  Would you like to run the following command?\n\n  $ echo a1\n'
+        seq 2 30 | sed 's/^/  echo a/'
+        printf '\n› 1. Yes, proceed (y)\n  2. Yes, and don'"'"'t ask again for commands that start with `echo a1` (p)\n  3. No, and tell Codex what to do differently (esc)\n'
+    } > "$fixture_tmp"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "bash -c 'cat $fixture_tmp; exec cat'"
+    sleep 0.4
+
+    timeout 1.5 bash "$SCRIPT_DIR/lib/approver-daemon.sh" \
+        "$_INTEG_SESSION" 0.2 "$audit_tmp" 2>/dev/null || true
+
+    local result
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "$fixture_tmp"
+    _integ_cleanup
+
+    [[ "$result" == *"APPROVED"* ]]
+}
+assert_ok "Integration Tall dialog: header above tail window approved" _run_integ_tall_dialog
+
+# ── Integration: hidden-prompt markers (PermissionRequest hook path) ─────────
+
+# Write a two-line marker exactly as the real PermissionRequest hook does:
+# line 1 epoch timestamp, line 2 the payload JSON.
+_write_hidden_marker() {  # $1 = dir, $2 = pane_id, $3 = tool_name
+    mkdir -p "$1"
+    printf '%s\n{"hook_event_name":"PermissionRequest","cwd":"/tmp","model":"gpt-5.5","permission_mode":"default","tool_name":"%s","tool_input":{"command":"uname -a"}}\n' \
+        "$(date +%s)" "$3" > "$1/$2"
+}
+
+# Shared daemon runner for the hidden-prompt tests: starts main_loop with the
+# full detector cascade extracted (so branch ordering matches production) and
+# CODEX_YOLO_WAITING_DIR pointed at $2.
+_integ_hidden_daemon() {
+    local audit_tmp="$1" waiting_dir="$2" run_secs="$3"
+    AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" \
+        timeout "$run_secs" bash -c '
+            source "'"$SCRIPT_DIR"'/lib/common.sh"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            AUDIT_LOG="'"$audit_tmp"'"
+            SESSION_NAME="'"$_INTEG_SESSION"'"
+            CODEX_YOLO_WAITING_DIR="'"$waiting_dir"'"
+            POLL_INTERVAL=0.2
+            COOLDOWN_SECS=2
+            declare -A LAST_APPROVED LAST_SENT_HASH SEND_STREAK HIDDEN_NUDGES HIDDEN_PREV_HASH HIDDEN_CHANGES HIDDEN_MARK_TS HIDDEN_GATED_LOGGED
+            main_loop
+        ' 2>/dev/null || true
+}
+
+# A frozen pane full of command text, no visible dialog, fresh marker → the
+# daemon must nudge, then land a blind Enter (proven by the pane's `read`
+# completing and touching the proof file).
+_run_integ_hidden_blind() {
+    _integ_cleanup
+    local audit_tmp waiting_dir proof pane_script pane_id
+    audit_tmp="$(mktemp)"
+    waiting_dir="$audit_tmp.waiting"
+    proof="$audit_tmp.proof"
+    pane_script="$audit_tmp.pane.sh"
+
+    cat > "$pane_script" <<SCRIPT
+#!/bin/sh
+seq 1 30 | sed 's/^/  echo hidden-command-line /'
+read _line
+touch '$proof'
+sleep 5
+SCRIPT
+    chmod +x "$pane_script"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "$pane_script"
+    sleep 0.4
+
+    pane_id="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    _write_hidden_marker "$waiting_dir" "$pane_id" 'Bash'
+
+    _integ_hidden_daemon "$audit_tmp" "$waiting_dir" 4
+
+    local result marker_gone=0 proved=0
+    result="$(cat "$audit_tmp")"
+    [[ -f "$waiting_dir/$pane_id" ]] || marker_gone=1
+    [[ -f "$proof" ]] && proved=1
+    rm -rf "$audit_tmp" "$waiting_dir" "$proof" "$pane_script"
+    _integ_cleanup
+
+    [[ "$result" == *"HIDDEN-PROMPT nudge"* ]] \
+        && [[ "$result" == *"hidden-blind+Enter"* ]] \
+        && (( marker_gone )) && (( proved ))
+}
+
+# A hidden PLAN dialog (marker tool_name names a plan tool) must be nudged (to
+# try to reveal it) but never blind-answered — plan approval is reserved for
+# the user. The marker is left in place for the visible path / user.
+_run_integ_hidden_plan() {
+    _integ_cleanup
+    local audit_tmp waiting_dir proof pane_script pane_id
+    audit_tmp="$(mktemp)"
+    waiting_dir="$audit_tmp.waiting"
+    proof="$audit_tmp.proof"
+    pane_script="$audit_tmp.pane.sh"
+
+    cat > "$pane_script" <<SCRIPT
+#!/bin/sh
+seq 1 30 | sed 's/^/  step /'
+read _line
+touch '$proof'
+sleep 5
+SCRIPT
+    chmod +x "$pane_script"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "$pane_script"
+    sleep 0.4
+
+    pane_id="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    _write_hidden_marker "$waiting_dir" "$pane_id" 'ExitPlanMode'
+
+    _integ_hidden_daemon "$audit_tmp" "$waiting_dir" 4
+
+    local result marker_present=0 proved=0
+    result="$(cat "$audit_tmp")"
+    [[ -f "$waiting_dir/$pane_id" ]] && marker_present=1
+    [[ -f "$proof" ]] && proved=1
+    rm -rf "$audit_tmp" "$waiting_dir" "$proof" "$pane_script"
+    _integ_cleanup
+
+    # Nudged, but NOT blind-answered; marker kept; the pane's read never fired.
+    [[ "$result" == *"HIDDEN-PROMPT nudge"* ]] \
+        && [[ "$result" == *"left for user"* ]] \
+        && [[ "$result" != *"hidden-blind"* ]] \
+        && (( marker_present )) && (( ! proved ))
+}
+
+# A fresh blind-answerable marker on a pane the user has scrolled into
+# copy-mode must get no nudges and no keys, and keep its marker — Enter in
+# copy-mode would destroy the user's scroll position/selection.
+_run_integ_hidden_copymode() {
+    _integ_cleanup
+    local audit_tmp waiting_dir proof pane_script pane_id
+    audit_tmp="$(mktemp)"
+    waiting_dir="$audit_tmp.waiting"
+    proof="$audit_tmp.proof"
+    pane_script="$audit_tmp.pane.sh"
+
+    cat > "$pane_script" <<SCRIPT
+#!/bin/sh
+seq 1 30 | sed 's/^/  echo hidden-command-line /'
+read _line
+touch '$proof'
+sleep 5
+SCRIPT
+    chmod +x "$pane_script"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "$pane_script"
+    sleep 0.4
+
+    pane_id="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    _write_hidden_marker "$waiting_dir" "$pane_id" 'Bash'
+    tmux copy-mode -t "$_INTEG_SESSION:test"
+    sleep 0.2
+
+    _integ_hidden_daemon "$audit_tmp" "$waiting_dir" 2
+
+    local result marker_present=0 proved=0
+    result="$(cat "$audit_tmp")"
+    [[ -f "$waiting_dir/$pane_id" ]] && marker_present=1
+    [[ -f "$proof" ]] && proved=1
+    rm -rf "$audit_tmp" "$waiting_dir" "$proof" "$pane_script"
+    _integ_cleanup
+
+    [[ "$result" != *"HIDDEN-PROMPT nudge"* ]] \
+        && [[ "$result" != *"hidden-blind"* ]] \
+        && (( marker_present )) && (( ! proved ))
+}
+
+# A marker on a pane that keeps producing output (a working agent) is stale —
+# the daemon must consume it without sending any key.
+_run_integ_hidden_stale() {
+    _integ_cleanup
+    local audit_tmp waiting_dir pane_script pane_id
+    audit_tmp="$(mktemp)"
+    waiting_dir="$audit_tmp.waiting"
+    pane_script="$audit_tmp.pane.sh"
+
+    cat > "$pane_script" <<'SCRIPT'
+#!/bin/sh
+while :; do date +%s%N; sleep 0.05; done
+SCRIPT
+    chmod +x "$pane_script"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "$pane_script"
+    sleep 0.4
+
+    pane_id="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    _write_hidden_marker "$waiting_dir" "$pane_id" 'Bash'
+
+    _integ_hidden_daemon "$audit_tmp" "$waiting_dir" 2
+
+    local result marker_gone=0
+    result="$(cat "$audit_tmp")"
+    [[ -f "$waiting_dir/$pane_id" ]] || marker_gone=1
+    rm -rf "$audit_tmp" "$waiting_dir" "$pane_script"
+    _integ_cleanup
+
+    [[ "$result" != *"hidden-blind"* ]] \
+        && [[ "$result" != *"APPROVED"* ]] \
+        && (( marker_gone ))
+}
+
+# A frozen pane whose bottom shows the idle composer (› prompt) must be nudged
+# at most, never blind-typed into — the proof file must stay absent.
+_run_integ_hidden_composer() {
+    _integ_cleanup
+    local audit_tmp waiting_dir proof pane_script pane_id
+    audit_tmp="$(mktemp)"
+    waiting_dir="$audit_tmp.waiting"
+    proof="$audit_tmp.proof"
+    pane_script="$audit_tmp.pane.sh"
+
+    cat > "$pane_script" <<SCRIPT
+#!/bin/sh
+seq 1 10 | sed 's/^/  output line /'
+printf '%s\n' '› Summarize recent commits' '  gpt-5.5 low fast · ~/git/project'
+read _line
+touch '$proof'
+sleep 5
+SCRIPT
+    chmod +x "$pane_script"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "$pane_script"
+    sleep 0.4
+
+    pane_id="$(tmux display-message -p -t "$_INTEG_SESSION:test" '#{pane_id}')"
+    _write_hidden_marker "$waiting_dir" "$pane_id" 'Bash'
+
+    _integ_hidden_daemon "$audit_tmp" "$waiting_dir" 2.5
+
+    local result proved=0
+    result="$(cat "$audit_tmp")"
+    [[ -f "$proof" ]] && proved=1
+    rm -rf "$audit_tmp" "$waiting_dir" "$proof" "$pane_script"
+    _integ_cleanup
+
+    [[ "$result" != *"hidden-blind"* ]] && (( ! proved ))
+}
+
+assert_ok  "Integration Hidden: frozen command pane gets nudges then blind Enter" _run_integ_hidden_blind
+assert_ok  "Integration Hidden: hidden plan dialog nudged but never blind-answered" _run_integ_hidden_plan
+assert_ok  "Integration Hidden: copy-mode pane gets no nudges or keys, marker kept" _run_integ_hidden_copymode
+assert_ok  "Integration Hidden: stale marker on working pane consumed, no keys" _run_integ_hidden_stale
+assert_ok  "Integration Hidden: idle composer blocks blind Enter" _run_integ_hidden_composer
+
+# ── Integration: static-pane send cap + duplicate-daemon lock ────────────────
+
+_run_integ_static_send_cap() {
+    _integ_cleanup
+    local audit_tmp fixture_tmp
+    audit_tmp="$(mktemp)"
+    fixture_tmp="$(mktemp)"
+
+    # A prompt-shaped pane that never reacts to keys (echo disabled, input
+    # swallowed by sleep) — the daemon must stop keying it after the cap.
+    cat > "$fixture_tmp" <<'PROMPT'
+  Would you like to run the following command?
+
+    ls /tmp
+
+  ❯ Yes, just this once
+    No, and tell Codex what to do differently
+PROMPT
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" \
+        "bash -c 'stty -echo 2>/dev/null; cat $fixture_tmp; exec sleep 30'"
+    sleep 0.5
+
+    # COOLDOWN_SECS=0 so only the send cap limits repeat sends
+    AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=0 \
+        timeout 4 bash -c '
+            source "'"$SCRIPT_DIR"'/lib/common.sh"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            AUDIT_LOG="'"$audit_tmp"'"
+            SESSION_NAME="'"$_INTEG_SESSION"'"
+            POLL_INTERVAL=0.2
+            COOLDOWN_SECS=0
+            main_loop
+        ' 2>/dev/null || true
+
+    local approved suppressed
+    approved="$(grep -c 'APPROVED' "$audit_tmp" 2>/dev/null)" || approved=0
+    suppressed="$(grep -c 'suppressed-static' "$audit_tmp" 2>/dev/null)" || suppressed=0
+    rm -f "$audit_tmp" "$fixture_tmp"
+    _integ_cleanup
+
+    # 5 sends (the cap), then exactly one suppressed-static audit line.
+    # The suppressed line itself contains "suppressed-static+<pattern>" and is
+    # logged via audit(), so subtract it from the APPROVED count.
+    (( approved - suppressed == 5 )) && (( suppressed == 1 ))
+}
+
+_run_integ_duplicate_daemon_refused() {
+    command -v flock >/dev/null 2>&1 || return 0
+    _integ_cleanup
+    local audit_tmp
+    audit_tmp="$(mktemp)"
+
+    tmux new-session -d -s "$_INTEG_SESSION" -n "test" "cat"
+    sleep 0.3
+
+    # First daemon runs the real script and holds the lock
+    bash "$SCRIPT_DIR/lib/approver-daemon.sh" "$_INTEG_SESSION" 0.2 "$audit_tmp" >/dev/null 2>&1 &
+    local first_pid=$!
+    sleep 0.7
+
+    # Second daemon for the same session must refuse and exit promptly
+    timeout 3 bash "$SCRIPT_DIR/lib/approver-daemon.sh" "$_INTEG_SESSION" 0.2 "$audit_tmp" >/dev/null 2>&1
+    local rc=$?
+
+    kill "$first_pid" 2>/dev/null
+    wait "$first_pid" 2>/dev/null
+    local result
+    result="$(cat "$audit_tmp")"
+    rm -f "$audit_tmp" "${audit_tmp}.lock"
+    _integ_cleanup
+
+    [[ "$result" == *"Duplicate daemon refused"* ]] && (( rc == 0 ))
+}
+
+assert_ok  "Integration Send cap: static pane keyed at most 5 times" _run_integ_static_send_cap
+assert_ok  "Integration Lock: duplicate daemon for same session refused" _run_integ_duplicate_daemon_refused
 
 # ── Integration: Slash picker veto ────────────────────────────────────────────
 
@@ -5204,7 +6279,7 @@ PANE
     AUDIT_LOG="$audit_tmp" SESSION_NAME="$_INTEG_SESSION" POLL_INTERVAL=0.2 COOLDOWN_SECS=2 \
         timeout 1.5 bash -c '
             source "'"$SCRIPT_DIR"'/lib/common.sh"
-            eval "$(sed -n '"'"'/^declare -A LAST_APPROVED/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^audit()/,/^}/p; /^in_cooldown()/,/^}/p; /^detect_prompt()/,/^}/p; /^detect_plan_prompt()/,/^}/p; /^detect_plan_choice_prompt()/,/^}/p; /^plan_approval_file()/,/^}/p; /^slash_approval_file()/,/^}/p; /^clear_plan_approval_marker()/,/^}/p; /^clear_slash_approval_marker()/,/^}/p; /^plan_approval_marker_valid()/,/^}/p; /^slash_approval_marker_valid()/,/^}/p; /^detect_slash_picker()/,/^}/p; /^detect_elicitation()/,/^}/p; /^detect_slash_command_prompt()/,/^}/p; /^approval_key_for_prompt()/,/^}/p; /^main_loop()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
+            eval "$(sed -n '"'"'/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p'"'"' "'"$SCRIPT_DIR"'/lib/approver-daemon.sh")"
             AUDIT_LOG="'"$audit_tmp"'"
             SESSION_NAME="'"$_INTEG_SESSION"'"
             POLL_INTERVAL=0.2

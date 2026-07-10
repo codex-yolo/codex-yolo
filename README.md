@@ -13,6 +13,7 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
+  - [Model selection](#model-selection)
 - [Worktree mode](#worktree-mode)
 - [Navigation](#navigation)
 - [Control commands](#control-commands)
@@ -71,13 +72,20 @@ The tool runs agents in whatever directory you invoke it from (or the `-d`/`--di
 codex-yolo "fix the login bug" "add unit tests for auth" "update the README"
 
 # Use a specific model
-codex-yolo -m o4-mini "refactor the API layer"
+codex-yolo -m gpt-5.5 "refactor the API layer"
+
+# Dial the reasoning effort down (default: xhigh)
+codex-yolo -e medium "quick cleanup pass"
 
 # Point agents at a different project
 codex-yolo -d /path/to/project "run the test suite and fix failures"
 ```
 
 Once launched, you're inside a tmux session with one window per agent. The last window (`control`) tails the audit log in real time and accepts slash commands.
+
+### Model selection
+
+Without `-m/--model`, codex-yolo picks the most capable model your account can actually use: it probes `gpt-5.6-sol`, then `gpt-5.6-terra`, then `gpt-5.5` with a tiny one-shot `codex exec` request and launches every agent (and the worktree merge resolver) with the first one that answers. The winner is cached in `~/.codex-yolo/model-cache` for 24 hours, so only the first launch of the day pays the probe; changing `CODEX_YOLO_MODEL_CANDIDATES` invalidates the cache immediately if the cached model is no longer a candidate. If no candidate responds (offline, not logged in), agents launch without `--model` and Codex uses its own configured default. Probing beats reading the local model catalog — the catalog lists what exists, not what your account/plan (or your installed CLI version) is currently allowed to use. Agents also run at `model_reasoning_effort = "xhigh"` by default — override with `-e/--effort`, or `-e none` to leave whatever your `~/.codex/config.toml` sets. The probe itself always runs at low effort, so an exotic configured effort level can never fail a model that would otherwise work. Tune with `CODEX_YOLO_MODEL_CACHE_TTL` (seconds, default 86400) and `CODEX_YOLO_MODEL_PROBE_TIMEOUT` (seconds per probe, default 60).
 
 ## Worktree mode
 
@@ -194,7 +202,12 @@ When the launch also kicks off Codex Auto-review reconciliation (i.e. interactiv
 ```
 -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
 -d, --dir PATH        Working directory for agents (default: current directory)
--m, --model MODEL     Model to use (e.g., o4-mini, o3, gpt-4.1)
+-m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
+                      Default: best available model, probed automatically
+                      (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
+-e, --effort LEVEL    Reasoning effort for each agent
+                      (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                      leave Codex's configured default). Default: xhigh
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
 -c, --command STRING  Slash command to run in the control pane after launch
@@ -245,6 +258,16 @@ also clears the modal at startup if it appears, so the bell runs without manual
 review. Any pre-existing `hooks.Stop` configuration is left untouched. Opt out of
 the bell entirely with `CODEX_YOLO_NO_BELL=1`.
 
+A second lifecycle hook — `hooks.PermissionRequest`, installed and pre-trusted
+the same way — records every Codex approval dialog as a per-pane marker file in
+`<audit-log>.waiting/`, so the approver daemon can recognize dialogs rendered
+**off-screen** (see "Hidden-prompt rails" below). The hook command is static:
+the session-specific marker directory comes from the `CODEX_YOLO_WAITING_DIR`
+environment variable the launcher sets on each agent pane, so outside a
+codex-yolo session the hook is a no-op and your other Codex sessions are
+unaffected. Any pre-existing `hooks.PermissionRequest` configuration is left
+untouched. Opt out with `CODEX_YOLO_NO_PERMISSION_HOOK=1`.
+
 ## How it works
 
 1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
@@ -252,7 +275,9 @@ the bell entirely with `CODEX_YOLO_NO_BELL=1`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
    - Detects eight prompt styles (see below), including Codex's `Replace goal?` confirmation
-   - Sends the confirm key via `tmux send-keys` to choose the first approval option (`Enter`, or `y` for prompts showing `Yes, proceed (y)`)
+   - Sends the confirm key via `tmux send-keys` to choose the approval option: `y` when a `Yes, proceed (y)` shortcut is advertised (lands on Yes regardless of the selection), `Enter` when the `›` marker already sits on the approval option, or the approval option's number when the selection was moved to another option
+   - Auto-answers question dialogs (plan-mode `Question N/M` menus and the like) that carry a capital-R `(Recommended)` option — `Enter` when the marker is already on it, the option's number otherwise. Questions without a recommended option are left for the user, as are multi-select checkbox questions
+   - Catches dialogs rendered **off-screen** — e.g. a diff taller than the pane pushes the option list below the viewport, where `capture-pane` can never see it. The pre-trusted `PermissionRequest` hook leaves a marker for the pane; when a fresh marker exists but no dialog is visible and the pane is frozen (a working agent keeps repainting, a pane stuck on a dialog stops), the daemon first "nudges" the window (resizes it one row down and back, forcing the TUI to re-render — a revealed dialog is then approved by the normal detectors with all their safeguards) and, if it stays invisible, sends a blind `Enter`: the dialog keeps keyboard focus with the approval option preselected even when it isn't drawn
    - Applies a 2-second per-pane cooldown to prevent double-approvals
 4. **Audit log** at `/tmp/codex-yolo-<session>.log` records every approval and control event with timestamps. Each session gets its own log, so concurrent codex-yolo processes don't interfere.
 
@@ -272,7 +297,38 @@ The approver requires the primary signal plus at least one secondary signal to f
 |---|---|---|
 | Question/header | Primary | `Would you like to run`, `Would you like to make`, `Allow Codex to`, `Approve app tool call`, `Do you trust the contents`, `Enable full access` |
 | Approval options | Secondary (at least one) | `Yes, just this once`, `Yes, proceed (y)`, `Yes, continue`, `Yes, and don't ask`, `Run the tool and continue`, `Apply full access`, `Yes, and allow this host` |
-| Denial/context | Secondary (at least one) | `No, and tell Codex`, `Decline this tool call`, `Go back without`, `Cancel this`, `may have side effects`, `may access external`, `may modify`, `untrusted`, `prompt injection` |
+| Denial/context | Secondary (at least one) | `No, and tell Codex`, `Decline this tool call`, `Go back without`, `Cancel this`, `may have side effects`, `may access external`, `may modify`, `untrusted`, `prompt injection`, `requires approval`, `requires confirmation` |
+
+Signals are normally matched against the last 25 pane lines, but a tall dialog
+(a multi-line command echoed under the header) can push the question header far
+above that window. The header is therefore also matched against the whole
+visible capture — line-anchored, so quoted headers in code output don't count —
+and only accepted while an approval option still sits near the pane bottom,
+where a live dialog always renders its option list. Secondary signals are then
+scoped to the header-to-bottom region.
+
+**Safety rails** — a static-pane send cap stops keying a pane after 5 sends
+with byte-identical content (a "prompt" that doesn't react to keys is a false
+positive; the audit log records `suppressed-static` once), configurable via
+`CODEX_YOLO_SEND_STREAK_CAP`. A per-session `flock` on `<audit-log>.lock`
+refuses duplicate daemons for the same session, so keys are never double-sent
+during redeploys.
+
+**Hidden-prompt rails** — the off-screen path never types blindly unless the
+pane has been byte-identical across consecutive polls (frozen), is not in
+copy-mode (the user may be scrolling), got `CODEX_YOLO_HIDDEN_NUDGE_MAX`
+repaint nudges first (default 2), and shows neither a `›` composer/selection
+marker nor box chrome (`╰`) in its bottom lines — so a stale marker can never
+submit text someone is composing. Blind `Enter` is reserved for plain
+command/edit approvals (identified by the marker payload's `tool_name`); plan
+and question dialogs are left for the user. A marker on a pane whose content
+*changed* is consumed without any key (the dialog was already answered — by
+the visual path racing the hook, or by you), markers expire after
+`CODEX_YOLO_NOTIFY_TTL` seconds (default 600), and blind answers are only
+attempted within `CODEX_YOLO_HIDDEN_BLIND_WINDOW` seconds of the dialog
+appearing (default 45). Nudges are logged as `HIDDEN-PROMPT nudge` in the
+audit log, blind approvals as `hidden-blind+Enter` — both visible live in the
+control window.
 
 **Prompt types handled:**
 
@@ -286,6 +342,7 @@ The approver requires the primary signal plus at least one secondary signal to f
 | Network/host | `Allow Codex to access <host>` | `Enter` → "Yes, just this once" |
 | MCP elicitation | `Yes, provide the requested info` | `Enter` → approve |
 | Replace goal | `Replace goal?` (from `/goal` via queue/loop) | `Enter` → "Replace current goal" |
+| Recommended question | numbered menu with a `(Recommended)` option and an active `›` marker | `Enter` on the recommended option, or its number to jump there |
 
 The `Replace goal?` prompt has its own three-signal detector (it requires
 `Replace goal?` plus `Replace current goal` plus `Keep the current goal` or
@@ -332,12 +389,15 @@ bash test_approver.sh Concurrent
 ```
 
 The test suite covers:
-- Prompt detection for all six Codex CLI permission prompt types (command, edit, tool, trust, full access, network)
-- MCP elicitation and `Replace goal?` prompt detection
-- False positive resistance (code output, partial signals, missing context)
-- Cooldown logic, command construction, audit logging
-- Turn-complete bell hook configuration and pre-trust (and the startup hook-review modal handling)
-- End-to-end integration tests using real tmux sessions
+- Prompt detection for all six Codex CLI permission prompt types (command, edit, tool, trust, full access, network), including tall dialogs whose header sits above the tail window
+- MCP elicitation, `Replace goal?`, and `(Recommended)` question prompt detection
+- Approval-key targeting (Enter vs the approval option's number vs the `y` shortcut)
+- False positive resistance (code output, partial signals, missing context, displayed-not-live menus)
+- Cooldown logic, the static-pane send cap, command construction (model/effort/marker-dir plumbing), audit logging
+- Best-model auto-selection (probe order, caching, TTL and candidate-list invalidation)
+- Turn-complete bell and PermissionRequest marker hook configuration and pre-trust (and the startup hook-review modal handling)
+- Hidden-prompt marker handling (freshness, blind-answer gating, composer/copy-mode/stale-marker safety)
+- End-to-end integration tests using real tmux sessions, including the nudge → blind-Enter path and the duplicate-daemon lock
 - Concurrent daemon isolation (no crosstalk between sessions)
 - Worktree creation, cleanup, conflict detection, and merge behavior
 
@@ -348,9 +408,11 @@ The test suite covers:
 - **Real-time conflict detection** — A background daemon polls `git merge-tree` across all branch pairs and logs conflicts as they emerge.
 - **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
 - **Convenience-first automation** — Standard sessions use Codex `--yolo`, so this is intended only for isolated environments where broad command execution is acceptable.
-- **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation and the `Replace goal?` confirmation, using a multi-signal approach that minimizes false positives.
+- **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation, the `Replace goal?` confirmation, and `(Recommended)` question menus, using a multi-signal approach that minimizes false positives; the approval key always lands on the approval option even when the selection was moved.
+- **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5`), caches the winner for 24h, and runs agents at `xhigh` reasoning effort by default (`-e/--effort` to override).
+- **Off-screen dialog handling** — A pre-trusted Codex `PermissionRequest` hook records approval dialogs as per-pane markers, so dialogs rendered below the viewport are revealed by repaint nudges or answered blind under strict safety gates.
 - **Turn-complete bell** — Configures (and pre-trusts) a Codex `Stop` hook so the terminal bell rings when an agent finishes its turn; opt out with `CODEX_YOLO_NO_BELL=1`.
-- **Reliability and traceability** — Per-pane cooldowns, detailed audit logging, and an extensive test suite emphasize reliability and traceability.
+- **Reliability and traceability** — Per-pane cooldowns, a static-pane send cap, a duplicate-daemon lock, detailed audit logging, and an extensive test suite emphasize reliability and traceability.
 - **No CLI patching or containerization** — Works entirely at the terminal level without modifying the Codex binary or wrapping it in containers.
 
 ## Development history

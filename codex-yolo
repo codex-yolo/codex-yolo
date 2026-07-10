@@ -17,7 +17,12 @@ Launch parallel OpenAI Codex CLI agents in tmux with auto-approval.
 Options:
   -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
   -d, --dir PATH        Working directory for agents (default: current directory)
-  -m, --model MODEL     Model to use (e.g., o4-mini, o3, gpt-4.1)
+  -m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
+                        Default: best available model, probed automatically
+                        (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
+  -e, --effort LEVEL    Reasoning effort for each agent
+                        (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                        leave Codex's configured default). Default: xhigh
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
   -c, --command STRING  Slash command to run in the control pane after launch
@@ -96,7 +101,7 @@ codex_yolo_inject_control_command() {
 }
 
 main() {
-    local session_name="" work_dir="" model="" poll_interval="0.3" resume=0 prompt_file=""
+    local session_name="" work_dir="" model="" effort="xhigh" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
     local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
@@ -109,6 +114,7 @@ main() {
             -s|--session)  session_name="$2"; shift 2 ;;
             -d|--dir)      work_dir="$2"; shift 2 ;;
             -m|--model)    model="$2"; shift 2 ;;
+            -e|--effort)   effort="$2"; shift 2 ;;
             -p|--poll)     poll_interval="$2"; shift 2 ;;
             -f|--file)     prompt_file="$2"; shift 2 ;;
             -c|--command)
@@ -144,6 +150,18 @@ main() {
 
     # Check prerequisites
     check_prereqs || exit 1
+
+    # Validate -e/--effort ('none' leaves Codex's configured default). Unknown
+    # levels only warn: Codex treats an unrecognized model_reasoning_effort as
+    # the model default rather than erroring, so passing through is safe.
+    if [[ "$effort" == "none" ]]; then
+        effort=""
+    elif [[ -n "$effort" ]]; then
+        case "$effort" in
+            minimal|low|medium|high|xhigh|max|ultra) ;;
+            *) log_warn "Unknown effort level: $effort (expected minimal|low|medium|high|xhigh|max|ultra) — passing through" ;;
+        esac
+    fi
 
     # Handle --resume
     if (( resume )); then
@@ -222,8 +240,33 @@ main() {
         wt_create_all "$work_dir" "$SESSION_NAME" "$base_branch" "${#tasks[@]}" || exit 1
     fi
 
+    # No -m/--model given: pick the best model the account can actually use
+    # (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5, probed and cached — see
+    # common.sh). Runs after every cheap validation so bad invocations fail
+    # fast instead of paying a model probe first.
+    if [[ -z "$model" ]]; then
+        model="$(resolve_best_model)"
+        if [[ -n "$model" ]]; then
+            log_info "Auto-selected model: $model (override with -m/--model)"
+        fi
+    fi
+
     # Truncate audit log for this run
     : > "$AUDIT_LOG"
+
+    # Per-session marker directory for the PermissionRequest hook (see
+    # codex_yolo_configure_permission_hook in common.sh): each TUI agent pane
+    # is launched with CODEX_YOLO_WAITING_DIR in its environment, so approval
+    # dialogs leave per-pane markers the approver daemon uses to recognize
+    # dialogs rendered off-screen. Cleared per run so stale markers from a
+    # previous session with the same name can never trigger keys.
+    local waiting_dir="${AUDIT_LOG}.waiting"
+    if mkdir -p "$waiting_dir" 2>/dev/null; then
+        rm -f "$waiting_dir"/* 2>/dev/null || true
+    else
+        waiting_dir=""
+        log_warn "Could not create marker dir ${AUDIT_LOG}.waiting; off-screen prompt detection disabled"
+    fi
 
     log_info "Creating tmux session: $SESSION_NAME"
     log_info "Working directory: $work_dir"
@@ -239,9 +282,9 @@ main() {
     fi
 
     if (( worktree_mode )); then
-        cmd="$(build_exec_agent_cmd "$model" "$first_task")"
+        cmd="$(build_exec_agent_cmd "$model" "$first_task" "$effort")"
     else
-        cmd="$(build_agent_cmd "$model" "$first_task")"
+        cmd="$(build_agent_cmd "$model" "$first_task" "$effort" "$waiting_dir")"
     fi
     if (( worktree_mode )); then
         cmd="$cmd ; touch '$(wt_done_marker "$SESSION_NAME" 1)'"
@@ -270,9 +313,9 @@ main() {
         fi
 
         if (( worktree_mode )); then
-            cmd="$(build_exec_agent_cmd "$model" "$task")"
+            cmd="$(build_exec_agent_cmd "$model" "$task" "$effort")"
         else
-            cmd="$(build_agent_cmd "$model" "$task")"
+            cmd="$(build_agent_cmd "$model" "$task" "$effort" "$waiting_dir")"
         fi
         if (( worktree_mode )); then
             cmd="$cmd ; touch '$(wt_done_marker "$SESSION_NAME" $((i+1)))'"
@@ -302,6 +345,7 @@ main() {
             local merge_opts=""
             (( no_cleanup )) && merge_opts="$merge_opts --no-cleanup"
             [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
+            [[ -n "$effort" ]] && merge_opts="$merge_opts --effort $effort"
             [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] && merge_opts="$merge_opts --permissions '$CODEX_YOLO_PERMISSION_PROFILE'"
             (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && merge_opts="$merge_opts --no-codex-sandbox"
             if [[ -n "${CODEX_YOLO_FAKE_BWRAP_DIR:-}" ]]; then
@@ -344,13 +388,23 @@ main() {
 }
 
 build_agent_cmd() {
-    local model="$1" task="$2"
+    local model="$1" task="$2" effort="${3:-}" waiting_dir="${4:-}"
     local cmd
     local prefix
     local permission_arg
+    local effort_arg
 
     prefix="$(codex_yolo_command_prefix)"
     permission_arg="$(codex_yolo_permission_config_arg)"
+    effort_arg="$(codex_yolo_effort_config_arg "$effort")"
+
+    # Marker dir for the PermissionRequest hook, passed via the pane
+    # environment (the hook command is static — see common.sh). Optional:
+    # without it the daemon simply has no off-screen prompt markers.
+    if [[ -n "$waiting_dir" ]]; then
+        local escaped_waiting="${waiting_dir//\'/\'\\\'\'}"
+        prefix="CODEX_YOLO_WAITING_DIR='$escaped_waiting' $prefix"
+    fi
 
     if (( CODEX_YOLO_FORCE_CODEX_SANDBOX )); then
         cmd="${prefix}codex --full-auto $permission_arg"
@@ -363,6 +417,10 @@ build_agent_cmd() {
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
+    fi
+
+    if [[ -n "$effort_arg" ]]; then
+        cmd="$cmd ${effort_arg%" "}"
     fi
 
     # No task = interactive mode
@@ -389,8 +447,9 @@ build_agent_cmd() {
 }
 
 build_exec_agent_cmd() {
-    local model="$1" task="$2"
+    local model="$1" task="$2" effort="${3:-}"
     local cmd
+    local effort_arg
     cmd="$(codex_yolo_command_prefix)codex exec $(codex_yolo_permission_config_arg)"
     cmd="${cmd%" "}"
 
@@ -400,6 +459,11 @@ build_exec_agent_cmd() {
 
     if [[ -n "$model" ]]; then
         cmd="$cmd --model $model"
+    fi
+
+    effort_arg="$(codex_yolo_effort_config_arg "$effort")"
+    if [[ -n "$effort_arg" ]]; then
+        cmd="$cmd ${effort_arg%" "}"
     fi
 
     if [[ "$task" == *$'\n'* ]]; then
