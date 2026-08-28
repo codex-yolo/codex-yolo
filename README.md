@@ -253,13 +253,15 @@ install.sh options:
 --local               Install from the local repo without pulling from GitHub
 ```
 
-By default, `codex-yolo` probes `codex sandbox linux true` once. In containers
-where bubblewrap fails with namespace permission errors, `codex-yolo` creates a
-temporary fake `bwrap` earlier in `PATH` and launches agents without Codex
-sandboxing. The fake `bwrap` executes the command after bubblewrap's `--`
-separator directly, so it should only be used inside an externally isolated
-container. Use `--force-codex-sandbox` to require the real sandbox and surface
-failures instead.
+By default, `codex-yolo` probes `codex sandbox linux true` once. If that probe
+fails inside a detected container (including `bwrap: No permissions to create
+new namespace`), `codex-yolo` creates a temporary fake `bwrap` earlier in
+`PATH` and launches agents without Codex sandboxing. The shim is required even
+when the CLI bypass flag is present because a managed permission policy may
+reject the flag and force commands back through `bwrap`. The fake `bwrap`
+executes the command after bubblewrap's `--` separator directly, so it should
+only be used inside an externally isolated container. Use
+`--force-codex-sandbox` to require the real sandbox and surface failures instead.
 
 For Codex `/permissions`, `codex-yolo` defaults to **Approve for me** (the
 `codex-auto-review` profile). Explicit overrides remain available with

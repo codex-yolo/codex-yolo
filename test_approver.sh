@@ -4437,14 +4437,14 @@ assert_ok "codex_yolo_permission_config_arg: emits Codex override" _test_permiss
 section "configure_codex_sandbox — Sandbox fallback"
 
 _make_codex_sandbox_stub() {
-    local dir="$1" exit_code="$2"
+    local dir="$1" exit_code="$2" message="${3:-bwrap: No permissions to create new namespace}"
     cat > "$dir/codex" <<EOF
 #!/usr/bin/env bash
 if [[ "\$1 \$2 \$3" == "sandbox linux true" ]]; then
     if [[ "$exit_code" -eq 0 ]]; then
         exit 0
     fi
-    echo "bwrap: Failed to create namespace" >&2
+    echo "$message" >&2
     exit "$exit_code"
 fi
 exit 0
@@ -4500,10 +4500,10 @@ _test_configure_auto_sandbox_unsupported() {
     (( CODEX_YOLO_FORCE_CODEX_SANDBOX == 0 ))
 }
 
-_test_configure_auto_container_namespace_error_uses_fake_bwrap() {
-    local stub_dir old_path result fake_dir
+_test_configure_auto_container_failure_uses_fake_bwrap() {
+    local message="$1" stub_dir old_path result fake_dir
     stub_dir="$(mktemp -d)"
-    _make_codex_sandbox_stub "$stub_dir" 1
+    _make_codex_sandbox_stub "$stub_dir" 1 "$message"
     fake_dir="$stub_dir/fake-bwrap"
     old_path="$PATH"
     PATH="$stub_dir:$PATH"
@@ -4579,7 +4579,12 @@ _test_configure_force_sandbox_option() {
 
 assert_ok "configure_codex_sandbox: auto keeps sandbox when probe succeeds" _test_configure_auto_sandbox_supported
 assert_ok "configure_codex_sandbox: auto bypasses sandbox when probe fails" _test_configure_auto_sandbox_unsupported
-assert_ok "configure_codex_sandbox: auto uses fake bwrap for container namespace errors" _test_configure_auto_container_namespace_error_uses_fake_bwrap
+assert_ok "bwrap matcher: accepts exact Docker namespace error" \
+    codex_yolo_bwrap_namespace_error "bwrap: No permissions to create new namespace"
+assert_ok "configure_codex_sandbox: Docker namespace error uses fake bwrap" \
+    _test_configure_auto_container_failure_uses_fake_bwrap "bwrap: No permissions to create new namespace"
+assert_ok "configure_codex_sandbox: any container probe failure uses fake bwrap" \
+    _test_configure_auto_container_failure_uses_fake_bwrap "sandbox helper failed without a known bwrap message"
 assert_ok "fake bwrap: executes command after separator" _test_fake_bwrap_execs_command_after_separator
 assert_ok "build_agent_cmd: prefixes fake bwrap path" _test_build_agent_cmd_prefixes_fake_bwrap_path
 assert_ok "configure_codex_sandbox: --no-codex-sandbox bypasses sandbox" _test_configure_no_sandbox_option

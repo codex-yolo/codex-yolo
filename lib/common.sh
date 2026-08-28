@@ -195,7 +195,8 @@ codex_yolo_running_in_container() {
 
 codex_yolo_bwrap_namespace_error() {
   local output="$1"
-  [[ "$output" == *"No permissions to create a new namespace"* ]] || \
+  [[ "$output" == *"No permissions to create new namespace"* ]] || \
+    [[ "$output" == *"No permissions to create a new namespace"* ]] || \
     [[ "$output" == *"Failed to create namespace"* ]] || \
     [[ "$output" == *"Operation not permitted"* ]]
 }
@@ -445,12 +446,14 @@ configure_codex_sandbox() {
                 local first_line="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE%%$'\n'*}"
                 [[ -z "$first_line" ]] && first_line="codex sandbox linux true failed"
 
-                if codex_yolo_bwrap_namespace_error "$CODEX_YOLO_SANDBOX_PROBE_MESSAGE"; then
-                    codex_yolo_enable_fake_bwrap || return 1
-                    log_warn "Container bwrap is unavailable; using fake bwrap shim: $CODEX_YOLO_FAKE_BWRAP_DIR/bwrap"
-                else
-                    log_warn "Container detected; launching agents without Codex sandboxing."
-                fi
+                # The outer container is already the isolation boundary. Always
+                # shadow bwrap after a failed probe: managed requirements may
+                # reject --dangerously-bypass-approvals-and-sandbox and force
+                # Codex back through bwrap, so the flag alone is not a reliable
+                # fallback in Docker. --force-codex-sandbox skips this path.
+                codex_yolo_enable_fake_bwrap || return 1
+                log_warn "Container Codex sandbox is unavailable; using outer container isolation."
+                log_warn "Using fake bwrap shim: $CODEX_YOLO_FAKE_BWRAP_DIR/bwrap"
 
       log_warn "Sandbox probe: $first_line"
       codex_yolo_warn_bwrap_prerequisites "$CODEX_YOLO_SANDBOX_PROBE_MESSAGE"
