@@ -25,6 +25,7 @@ log_error() {
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX="${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0}"
 CODEX_YOLO_FORCE_CODEX_SANDBOX="${CODEX_YOLO_FORCE_CODEX_SANDBOX:-0}"
+CODEX_YOLO_ASK_FOR_APPROVAL="${CODEX_YOLO_ASK_FOR_APPROVAL:-0}"
 CODEX_YOLO_SANDBOX_PROBE_RESULT="${CODEX_YOLO_SANDBOX_PROBE_RESULT:-}"
 CODEX_YOLO_SANDBOX_PROBE_MESSAGE="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE:-}"
 CODEX_YOLO_CONTAINER_DETECTED="${CODEX_YOLO_CONTAINER_DETECTED:-}"
@@ -193,10 +194,16 @@ codex_yolo_running_in_container() {
 }
 
 codex_yolo_bwrap_namespace_error() {
-    local output="$1"
-    [[ "$output" == *"No permissions to create a new namespace"* ]] || \
+  local output="$1"
+  [[ "$output" == *"No permissions to create a new namespace"* ]] || \
     [[ "$output" == *"Failed to create namespace"* ]] || \
     [[ "$output" == *"Operation not permitted"* ]]
+}
+
+codex_yolo_warn_bwrap_prerequisites() {
+  local output="$1"
+  codex_yolo_bwrap_namespace_error "$output" || return 0
+  log_warn "Bubblewrap setup guide: https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites"
 }
 
 codex_yolo_enable_fake_bwrap() {
@@ -347,18 +354,17 @@ PY
 configure_codex_permissions() {
     local policy="${1:-auto}"
 
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
+
     case "$policy" in
         auto|"")
-            if (( ${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0} )) && codex_yolo_running_in_container; then
-                CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
-                log_info "Codex permissions default: Auto-review (container without Codex sandbox)"
-            elif codex_yolo_full_access_allowed; then
-                CODEX_YOLO_PERMISSION_PROFILE="full-access"
-                log_info "Codex permissions default: Full Access"
-            else
-                CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
-                log_info "Codex permissions default: Auto-review (Full Access unavailable)"
-            fi
+            CODEX_YOLO_PERMISSION_PROFILE=""
+            CODEX_YOLO_ASK_FOR_APPROVAL=1
+            log_info "Codex permissions default: Ask for approval"
+            ;;
+        ask-for-approval|ask|manual)
+            CODEX_YOLO_PERMISSION_PROFILE=""
+            CODEX_YOLO_ASK_FOR_APPROVAL=1
             ;;
         full-access|codex-auto-review)
             CODEX_YOLO_PERMISSION_PROFILE="$policy"
@@ -376,9 +382,20 @@ configure_codex_permissions() {
     esac
 
     export CODEX_YOLO_PERMISSION_PROFILE
+    export CODEX_YOLO_ASK_FOR_APPROVAL
 }
 
 codex_yolo_permission_config_arg() {
+    # An explicit no-sandbox request takes precedence over the safe default.
+    if (( ${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0} )); then
+        return 0
+    fi
+
+    if (( ${CODEX_YOLO_ASK_FOR_APPROVAL:-0} )); then
+        printf -- "--sandbox workspace-write --ask-for-approval on-request -c 'approvals_reviewer=\"user\"' "
+        return 0
+    fi
+
     [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] || return 0
 
     local profile="${CODEX_YOLO_PERMISSION_PROFILE//\"/\\\"}"
@@ -435,8 +452,9 @@ configure_codex_sandbox() {
                     log_warn "Container detected; launching agents without Codex sandboxing."
                 fi
 
-                log_warn "Sandbox probe: $first_line"
-                log_warn "Use --force-codex-sandbox to require Codex sandboxing anyway."
+      log_warn "Sandbox probe: $first_line"
+      codex_yolo_warn_bwrap_prerequisites "$CODEX_YOLO_SANDBOX_PROBE_MESSAGE"
+      log_warn "Use --force-codex-sandbox to require Codex sandboxing anyway."
                 return 0
             fi
 
@@ -447,9 +465,10 @@ configure_codex_sandbox() {
             CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
             local first_line="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE%%$'\n'*}"
             [[ -z "$first_line" ]] && first_line="codex sandbox linux true failed"
-            log_warn "Codex Linux sandbox is unavailable; launching agents without Codex sandboxing."
-            log_warn "Sandbox probe: $first_line"
-            log_warn "Use --force-codex-sandbox to require Codex sandboxing instead."
+      log_warn "Codex Linux sandbox is unavailable; launching agents without Codex sandboxing."
+      log_warn "Sandbox probe: $first_line"
+      codex_yolo_warn_bwrap_prerequisites "$CODEX_YOLO_SANDBOX_PROBE_MESSAGE"
+      log_warn "Use --force-codex-sandbox to require Codex sandboxing instead."
             ;;
         off|none|no|disabled)
             CODEX_YOLO_BYPASS_CODEX_SANDBOX=1

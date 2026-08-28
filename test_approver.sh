@@ -128,6 +128,30 @@ eval "$(sed -n '/^build_exec_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 # Source control-pane helpers without running the interactive loop.
 source "$SCRIPT_DIR/lib/control-pane.sh" "" "" "standard"
 
+section "Codex permissions default"
+
+assert_contains "Permissions: launcher defaults to Approve for me" \
+  "$(sed -n '/local codex_permissions_policy=/p' "$SCRIPT_DIR/codex-yolo")" \
+  'CODEX_YOLO_PERMISSIONS:-auto-review'
+
+section "Bubblewrap prerequisites"
+
+_installer_source="$(<"$SCRIPT_DIR/install.sh")"
+assert_contains "Bubblewrap: installer checks Linux and WSL2 hosts" \
+  "$_installer_source" \
+  '[[ "$OS" == Linux* && "$IS_TERMUX" -eq 0 ]]'
+assert_contains "Bubblewrap: installer installs the distribution package" \
+  "$_installer_source" \
+  'install_pkg bubblewrap'
+assert_contains "Bubblewrap: installer links the official prerequisites" \
+  "$_installer_source" \
+  'https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites'
+
+_out="$(codex_yolo_warn_bwrap_prerequisites 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' 2>&1)"
+assert_contains "Bubblewrap: RTM_NEWADDR failure links the official guide" \
+  "$_out" \
+  'https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites'
+
 # ── helper to build realistic pane captures ──────────────────────────────────
 
 # Simulates Codex CLI command execution approval prompt.

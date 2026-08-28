@@ -15,13 +15,14 @@ Usage: codex-yolo [options] ["task one" "task two" ...]
 Launch parallel OpenAI Codex CLI agents in tmux with auto-approval.
 
 Options:
+  Default Codex permissions: Ask for approval (workspace-write, on-request, user review)
   -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
   -d, --dir PATH        Working directory for agents (default: current directory)
   -m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
                         Default: best available model, probed automatically
                         (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
   -e, --effort LEVEL    Reasoning effort for each agent
-                        (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                          (minimal|low|medium|high|xhigh|max, or 'none' to
                         leave Codex's configured default). Default: xhigh
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
@@ -31,7 +32,7 @@ Options:
                         Compose multiple commands via /queue rather than repeating -c.
                         Works with --resume to inject into an existing session.
   -r, --resume          Re-attach to an existing yolo session
-  --permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
+  --permissions PROFILE Set Codex /permissions profile (default: auto-review / "Approve for me")
   --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
   --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
   -h, --help            Show this help
@@ -104,7 +105,7 @@ main() {
     local session_name="" work_dir="" model="" effort="xhigh" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
-    local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
+  local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto-review}"
     local control_command=""
     local tasks=()
 
@@ -151,15 +152,17 @@ main() {
     # Check prerequisites
     check_prereqs || exit 1
 
-    # Validate -e/--effort ('none' leaves Codex's configured default). Unknown
-    # levels only warn: Codex treats an unrecognized model_reasoning_effort as
-    # the model default rather than erroring, so passing through is safe.
+    # Validate -e/--effort ('none' leaves Codex's configured default).
+    # Unknown levels are rejected by the API, so fail before starting a session.
     if [[ "$effort" == "none" ]]; then
         effort=""
     elif [[ -n "$effort" ]]; then
         case "$effort" in
-            minimal|low|medium|high|xhigh|max|ultra) ;;
-            *) log_warn "Unknown effort level: $effort (expected minimal|low|medium|high|xhigh|max|ultra) — passing through" ;;
+            minimal|low|medium|high|xhigh|max) ;;
+            *)
+                log_error "Unknown effort level: $effort (expected minimal|low|medium|high|xhigh|max, or none)"
+                exit 1
+                ;;
         esac
     fi
 
@@ -216,7 +219,17 @@ main() {
     # Ensure Codex CLI config directory exists
     ensure_codex_config
     configure_codex_sandbox "$codex_sandbox_policy" || exit 1
+  if [[ "$codex_permissions_policy" == "auto" || -z "$codex_permissions_policy" ]]; then
+    # Use the requirements-compatible workspace sandbox directly. Do not also
+    # inject a named permission profile: profiles that resolve to
+    # danger-full-access trigger a managed-requirements warning before Codex
+    # falls back to the administrator-required profile.
+    CODEX_YOLO_PERMISSION_PROFILE=""
+    export CODEX_YOLO_PERMISSION_PROFILE
+    log_info "Codex permissions default: WorkspaceWrite"
+  else
     configure_codex_permissions "$codex_permissions_policy" || exit 1
+  fi
 
     # ── worktree setup ───────────────────────────────────────────────────────
     if (( worktree_mode )); then
@@ -407,11 +420,27 @@ build_agent_cmd() {
     fi
 
     if (( CODEX_YOLO_FORCE_CODEX_SANDBOX )); then
-        cmd="${prefix}codex --full-auto $permission_arg"
+        if (( ${CODEX_YOLO_ASK_FOR_APPROVAL:-0} )); then
+            cmd="${prefix}codex $permission_arg"
+        else
+    if [[ -n "$permission_arg" ]]; then
+      # Permission profiles and legacy --sandbox settings do not compose.
+      cmd="${prefix}codex $permission_arg"
+    else
+      cmd="${prefix}codex --sandbox workspace-write"
+    fi
+        fi
     elif (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then
         cmd="${prefix}codex --dangerously-bypass-approvals-and-sandbox $permission_arg"
+    elif (( ${CODEX_YOLO_ASK_FOR_APPROVAL:-0} )); then
+        cmd="${prefix}codex $permission_arg"
     else
-        cmd="${prefix}codex --yolo $permission_arg"
+    if [[ -n "$permission_arg" ]]; then
+      # Permission profiles and legacy --sandbox settings do not compose.
+      cmd="${prefix}codex $permission_arg"
+    else
+      cmd="${prefix}codex --sandbox workspace-write"
+    fi
     fi
     cmd="${cmd%" "}"
 
@@ -450,7 +479,13 @@ build_exec_agent_cmd() {
     local model="$1" task="$2" effort="${3:-}"
     local cmd
     local effort_arg
-    cmd="$(codex_yolo_command_prefix)codex exec $(codex_yolo_permission_config_arg)"
+  local permission_arg
+  permission_arg="$(codex_yolo_permission_config_arg)"
+  if [[ -n "$permission_arg" ]]; then
+    cmd="$(codex_yolo_command_prefix)codex exec $permission_arg"
+  else
+    cmd="$(codex_yolo_command_prefix)codex exec --sandbox workspace-write"
+  fi
     cmd="${cmd%" "}"
 
     if (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )); then

@@ -7,7 +7,7 @@
 
 Run parallel OpenAI Codex CLI agents in tmux with automatic permission approval. Optionally isolate each agent in its own git worktree with real-time merge conflict detection and automated conflict resolution.
 
-When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts the user before running commands, applying edits, or accessing the network. Standard agent windows are launched with Codex's `--yolo` mode for maximum automation; the tmux approver daemon remains in place for prompt styles that still appear.
+Codex CLI can prompt before commands leave the workspace sandbox or require other elevated permissions. Standard agent windows now start in **Ask for approval** mode (`workspace-write`, `on-request`, user review); the tmux approver daemon handles those prompts at the terminal level.
 
 ## Table of contents
 
@@ -28,6 +28,13 @@ When approval policy is set to `on-request` or `untrusted`, Codex CLI prompts th
 - [Development history](#development-history)
 
 ## Installation
+
+On Linux and WSL2, the installer installs the distribution `bubblewrap` package
+when `bwrap` is missing from `PATH`, as recommended by Codex's official sandbox
+prerequisites. The bundled helper remains Codex's fallback, but it requires
+unprivileged user namespaces. If a namespace or AppArmor warning remains, follow
+the [official troubleshooting steps](https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites),
+including the Ubuntu 24.04 AppArmor profile setup when applicable.
 
 **One-liner** (macOS, Linux, WSL, Termux):
 
@@ -199,6 +206,8 @@ When the launch also kicks off Codex Auto-review reconciliation (i.e. interactiv
 
 ## Options
 
+The default permissions mode is **Ask for approval** (`workspace-write`, `on-request`, user review). Use `--permissions ask-for-approval` to request it explicitly; existing `full-access`, `auto-review`, and `none` overrides remain available.
+
 ```
 -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
 -d, --dir PATH        Working directory for agents (default: current directory)
@@ -206,7 +215,7 @@ When the launch also kicks off Codex Auto-review reconciliation (i.e. interactiv
                       Default: best available model, probed automatically
                       (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
 -e, --effort LEVEL    Reasoning effort for each agent
-                      (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                          (minimal|low|medium|high|xhigh|max, or 'none' to
                       leave Codex's configured default). Default: xhigh
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
@@ -215,7 +224,7 @@ When the launch also kicks off Codex Auto-review reconciliation (i.e. interactiv
                       Must start with '/'. Multi-line strings are sent as a paste.
                       Works with --resume to inject into an existing session.
 -r, --resume          Re-attach to an existing yolo session
---permissions PROFILE Set Codex /permissions profile (default: full-access when allowed, else auto-review)
+    --permissions PROFILE Set Codex /permissions profile (default: auto-review / "Approve for me")
 --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
 --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
 -h, --help            Show help
@@ -239,10 +248,10 @@ separator directly, so it should only be used inside an externally isolated
 container. Use `--force-codex-sandbox` to require the real sandbox and surface
 failures instead.
 
-For Codex `/permissions`, `codex-yolo` defaults to Full Access when the active
-Codex requirements allow it. If Full Access is disabled by requirements, it uses
-Auto-review (`codex-auto-review`). In containers where the Codex sandbox is
-unavailable and codex-yolo has to rely on external isolation, the `auto` default
+For Codex `/permissions`, `codex-yolo` defaults to **Approve for me** (the
+`codex-auto-review` profile). Explicit overrides remain available with
+`--permissions full-access`, `--permissions auto-review`, or `--permissions none`.
+`CODEX_YOLO_PERMISSIONS=auto` selects Full Access when allowed and Auto-review otherwise.
 also uses Auto-review. Override this with `--permissions
 full-access`, `--permissions auto-review`, or `--permissions none`. For
 standard interactive Auto-review sessions, `codex-yolo` also reconciles the TUI
@@ -270,7 +279,7 @@ untouched. Opt out with `CODEX_YOLO_NO_PERMISSION_HOOK=1`.
 
 ## How it works
 
-1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task, each running `codex --yolo` for standard sessions or `codex exec` in worktree mode. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
+1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task. Standard sessions default to `workspace-write` with `on-request` approvals; `--yolo` is reserved for an explicit Full Access selection. Worktree mode uses `codex exec`. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
 2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop` and `/permissions auto-review`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
@@ -368,6 +377,8 @@ docs/
 
 ## Prerequisites
 
+  * `bubblewrap` on Linux and WSL2 (installed automatically when missing; see the [official Codex sandbox prerequisites](https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites))
+
 - **tmux** (tested with 3.4)
 - **codex** (OpenAI Codex CLI — installed from the standalone GitHub release or `npm install -g @openai/codex`)
 - **git** 2.38+ (required for worktree mode — `git merge-tree --write-tree`)
@@ -393,6 +404,7 @@ The test suite covers:
 - MCP elicitation, `Replace goal?`, and `(Recommended)` question prompt detection
 - Approval-key targeting (Enter vs the approval option's number vs the `y` shortcut)
 - False positive resistance (code output, partial signals, missing context, displayed-not-live menus)
+- Managed-requirements-compatible permission construction, including the safe default, explicit Full Access, and no-sandbox behavior
 - Cooldown logic, the static-pane send cap, command construction (model/effort/marker-dir plumbing), audit logging
 - Best-model auto-selection (probe order, caching, TTL and candidate-list invalidation)
 - Turn-complete bell and PermissionRequest marker hook configuration and pre-trust (and the startup hook-review modal handling)
@@ -407,7 +419,7 @@ The test suite covers:
 - **Git worktree isolation** — Each agent can work in its own branch and worktree, then merge back into the base branch.
 - **Real-time conflict detection** — A background daemon polls `git merge-tree` across all branch pairs and logs conflicts as they emerge.
 - **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
-- **Convenience-first automation** — Standard sessions use Codex `--yolo`, so this is intended only for isolated environments where broad command execution is acceptable.
+- **Requirements-compatible defaults** — Standard sessions omit `--yolo` and request `workspace-write` with `on-request` approvals, avoiding managed-policy fallback warnings. Explicit Full Access remains available for isolated environments where broad command execution is acceptable.
 - **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation, the `Replace goal?` confirmation, and `(Recommended)` question menus, using a multi-signal approach that minimizes false positives; the approval key always lands on the approval option even when the selection was moved.
 - **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5`), caches the winner for 24h, and runs agents at `xhigh` reasoning effort by default (`-e/--effort` to override).
 - **Off-screen dialog handling** — A pre-trusted Codex `PermissionRequest` hook records approval dialogs as per-pane markers, so dialogs rendered below the viewport are revealed by repaint nudges or answered blind under strict safety gates.

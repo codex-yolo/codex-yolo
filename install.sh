@@ -373,6 +373,20 @@ case "$OS" in
 esac
 
 # -------------------------------------------------------------------
+# Install bubblewrap on Linux / WSL2 if missing
+# -------------------------------------------------------------------
+
+# Codex's Linux sandbox uses the first bwrap executable on PATH. Its bundled
+# fallback requires unprivileged user namespaces, so prefer the distribution
+# package as recommended by the official sandbox prerequisites.
+if [[ "$OS" == Linux* && "$IS_TERMUX" -eq 0 ]] && ! command -v bwrap &>/dev/null; then
+  info "bubblewrap is not installed — attempting to install the Codex Linux sandbox prerequisite"
+  install_pkg bubblewrap
+  command -v bwrap &>/dev/null || error "bubblewrap installation failed — install it manually and re-run. See https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites"
+  info "bubblewrap installed successfully"
+fi
+
+# -------------------------------------------------------------------
 # Install tmux if missing
 # -------------------------------------------------------------------
 if ! command -v tmux &>/dev/null; then
