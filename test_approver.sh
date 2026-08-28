@@ -1765,15 +1765,15 @@ CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: no model" \
-    "codex --yolo 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "fix the bug")"
 assert_eq "build_agent_cmd: with model" \
-    "codex --yolo --model o4-mini 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write --model o4-mini 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "gpt-4.1" "it's a test")"
 assert_eq "build_agent_cmd: single-quote escaping" \
-    "codex --yolo --model gpt-4.1 'it'\\''s a test'" "$_out"
+    "codex --sandbox workspace-write --model gpt-4.1 'it'\\''s a test'" "$_out"
 
 _out="$(build_agent_cmd "" "simple task")"
 assert_contains "build_agent_cmd: starts with codex" "$_out" "codex"
@@ -1783,21 +1783,21 @@ assert_contains "build_agent_cmd: model flag present" "$_out" "--model o3"
 
 _out="$(build_agent_cmd "" "task with \"double quotes\"")"
 assert_eq "build_agent_cmd: double quotes preserved" \
-    "codex --yolo 'task with \"double quotes\"'" "$_out"
+    "codex --sandbox workspace-write 'task with \"double quotes\"'" "$_out"
 
 # Interactive mode (no task)
 _out="$(build_agent_cmd "" "")"
 assert_eq "build_agent_cmd: interactive mode" \
-    "codex --yolo" "$_out"
+    "codex --sandbox workspace-write" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "")"
 assert_eq "build_agent_cmd: interactive with model" \
-    "codex --yolo --model o4-mini" "$_out"
+    "codex --sandbox workspace-write --model o4-mini" "$_out"
 
 CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: permission profile" \
-    "codex --yolo -c 'permission_profile=\"codex-auto-review\"' 'fix the bug'" "$_out"
+    "codex -c 'permission_profile=\"codex-auto-review\"' 'fix the bug'" "$_out"
 
 CODEX_YOLO_PERMISSION_PROFILE=""
 
@@ -1810,8 +1810,8 @@ assert_eq "build_agent_cmd: no Codex sandbox uses explicit bypass" \
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=1
 _out="$(build_agent_cmd "o4-mini" "fix the bug")"
-assert_eq "build_agent_cmd: forced Codex sandbox uses full-auto" \
-    "codex --full-auto --model o4-mini 'fix the bug'" "$_out"
+assert_eq "build_agent_cmd: forced Codex sandbox uses workspace-write" \
+    "codex --sandbox workspace-write --model o4-mini 'fix the bug'" "$_out"
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
@@ -1819,43 +1819,43 @@ CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 # Reasoning effort rides along as a -c override, after the model
 _out="$(build_agent_cmd "gpt-5.6-sol" "fix the bug" "xhigh")"
 assert_eq "build_agent_cmd: effort after model" \
-    "codex --yolo --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "" "task" "max")"
 assert_eq "build_agent_cmd: effort without model" \
-    "codex --yolo -c 'model_reasoning_effort=\"max\"' 'task'" "$_out"
+    "codex --sandbox workspace-write -c 'model_reasoning_effort=\"max\"' 'task'" "$_out"
 
 _out="$(build_agent_cmd "gpt-5.5" "" "xhigh")"
 assert_eq "build_agent_cmd: effort in interactive mode" \
-    "codex --yolo --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'" "$_out"
+    "codex --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'" "$_out"
 
 _out="$(build_agent_cmd "gpt-5.5" "task" "")"
 assert_eq "build_agent_cmd: empty effort omits the override" \
-    "codex --yolo --model gpt-5.5 'task'" "$_out"
+    "codex --sandbox workspace-write --model gpt-5.5 'task'" "$_out"
 
 # The waiting dir rides along as a pane-environment assignment so the
 # PermissionRequest hook (static command, see common.sh) can find it
 _out="$(build_agent_cmd "gpt-5.5" "task" "xhigh" "/tmp/cy.log.waiting")"
 assert_eq "build_agent_cmd: waiting dir env + model + effort" \
-    "CODEX_YOLO_WAITING_DIR='/tmp/cy.log.waiting' codex --yolo --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'task'" "$_out"
+    "CODEX_YOLO_WAITING_DIR='/tmp/cy.log.waiting' codex --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'task'" "$_out"
 
 _out="$(build_agent_cmd "" "" "" "/tmp/it's.waiting")"
 assert_eq "build_agent_cmd: waiting dir single-quote escaping" \
-    "CODEX_YOLO_WAITING_DIR='/tmp/it'\\''s.waiting' codex --yolo" "$_out"
+    "CODEX_YOLO_WAITING_DIR='/tmp/it'\\''s.waiting' codex --sandbox workspace-write" "$_out"
 
 section "build_exec_agent_cmd — Worktree command construction"
 
 _out="$(build_exec_agent_cmd "" "fix the bug")"
 assert_eq "build_exec_agent_cmd: no model" \
-    "codex exec 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
 assert_eq "build_exec_agent_cmd: with model" \
-    "codex exec --model gpt-5 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write --model gpt-5 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "o3" "it's a test")"
 assert_eq "build_exec_agent_cmd: single-quote escaping" \
-    "codex exec --model o3 'it'\\''s a test'" "$_out"
+    "codex exec --sandbox workspace-write --model o3 'it'\\''s a test'" "$_out"
 
 _out="$(build_exec_agent_cmd "" "task")"
 assert_contains "build_exec_agent_cmd: uses codex exec" "$_out" "codex exec"
@@ -1870,24 +1870,24 @@ CODEX_YOLO_PERMISSION_PROFILE=""
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
 _out="$(build_exec_agent_cmd "" "fix the bug")"
 assert_eq "build_exec_agent_cmd: no Codex sandbox uses explicit bypass" \
-    "codex exec --dangerously-bypass-approvals-and-sandbox 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write --dangerously-bypass-approvals-and-sandbox 'fix the bug'" "$_out"
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=1
 _out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
 assert_eq "build_exec_agent_cmd: forced Codex sandbox keeps sandboxed exec" \
-    "codex exec --model gpt-5 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write --model gpt-5 'fix the bug'" "$_out"
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 
 _out="$(build_exec_agent_cmd "gpt-5.5" "fix the bug" "xhigh")"
 assert_eq "build_exec_agent_cmd: effort after model" \
-    "codex exec --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "" "task" "")"
 assert_eq "build_exec_agent_cmd: empty effort omits the override" \
-    "codex exec 'task'" "$_out"
+    "codex exec --sandbox workspace-write 'task'" "$_out"
 
 CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
@@ -4263,54 +4263,66 @@ _control_cleanup
 
 section "configure_codex_permissions — Permission profile defaults"
 
-_test_configure_permissions_full_access_allowed() {
+_test_configure_permissions_auto_uses_ask_for_approval() {
     CODEX_YOLO_FULL_ACCESS_ALLOWED=1
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || return 1
 
     local result=1
-    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "full-access" ]] && result=0
+    [[ -z "$CODEX_YOLO_PERMISSION_PROFILE" ]] && \
+    [[ "$CODEX_YOLO_ASK_FOR_APPROVAL" == "1" ]] && \
+    result=0
 
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
     return $result
 }
 
-_test_configure_permissions_container_without_sandbox_uses_auto_review() {
+_test_configure_permissions_container_without_sandbox_suppresses_manual_flags() {
     CODEX_YOLO_FULL_ACCESS_ALLOWED=1
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=1
     CODEX_YOLO_CONTAINER_DETECTED=1
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || return 1
 
     local result=1
-    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]] && \
-    codex_yolo_should_reconcile_auto_review 0 1 "" && \
+    [[ -z "$CODEX_YOLO_PERMISSION_PROFILE" ]] && \
+    [[ "$CODEX_YOLO_ASK_FOR_APPROVAL" == "1" ]] && \
+    [[ -z "$(codex_yolo_permission_config_arg)" ]] && \
+    ! codex_yolo_should_reconcile_auto_review 0 1 "" && \
     result=0
 
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
     CODEX_YOLO_CONTAINER_DETECTED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     return $result
 }
 
-_test_configure_permissions_full_access_disabled() {
+_test_configure_permissions_auto_ignores_full_access_availability() {
     CODEX_YOLO_FULL_ACCESS_ALLOWED=0
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || return 1
 
     local result=1
-    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]] && result=0
+    [[ -z "$CODEX_YOLO_PERMISSION_PROFILE" ]] && \
+    [[ "$CODEX_YOLO_ASK_FOR_APPROVAL" == "1" ]] && \
+    result=0
 
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
     return $result
 }
@@ -4363,7 +4375,7 @@ JSON
     return $result
 }
 
-_test_configure_permissions_approval_never_disabled() {
+_test_configure_permissions_auto_uses_ask_when_approval_never_disabled() {
     local fake_home
     fake_home="$(mktemp -d)"
     mkdir -p "$fake_home/.codex"
@@ -4375,33 +4387,38 @@ JSON
     HOME="$fake_home"
     CODEX_YOLO_FULL_ACCESS_ALLOWED=""
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
 
     configure_codex_permissions auto >/dev/null 2>&1 || result=2
-    if [[ "$result" != "2" && "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]]; then
+    if [[ "$result" != "2" && -z "$CODEX_YOLO_PERMISSION_PROFILE" && "$CODEX_YOLO_ASK_FOR_APPROVAL" == "1" ]]; then
         result=0
     fi
 
     HOME="$old_home"
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     rm -rf "$fake_home"
     return $result
 }
 
 _test_permission_config_arg() {
     CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
+    CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
     local output
     output="$(codex_yolo_permission_config_arg)"
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
     [[ "$output" == "-c 'permission_profile=\"codex-auto-review\"' " ]]
 }
 
-assert_ok "configure_codex_permissions: uses Full Access when allowed" _test_configure_permissions_full_access_allowed
-assert_ok "configure_codex_permissions: uses Auto-review in containers without Codex sandbox" _test_configure_permissions_container_without_sandbox_uses_auto_review
-assert_ok "configure_codex_permissions: uses Auto-review when Full Access disabled" _test_configure_permissions_full_access_disabled
+assert_ok "configure_codex_permissions: auto uses Ask for approval" _test_configure_permissions_auto_uses_ask_for_approval
+assert_ok "configure_codex_permissions: no-sandbox suppresses manual flags" _test_configure_permissions_container_without_sandbox_suppresses_manual_flags
+assert_ok "configure_codex_permissions: auto ignores Full Access availability" _test_configure_permissions_auto_ignores_full_access_availability
 assert_ok "configure_codex_permissions: accepts auto-review alias" _test_configure_permissions_auto_review_alias
 assert_ok "codex_yolo_full_access_allowed: honors requirements cache" _test_full_access_disabled_by_requirements_cache
 assert_ok "codex_yolo_full_access_allowed: honors approval policy requirements cache" _test_full_access_disabled_by_approval_requirements_cache
-assert_ok "configure_codex_permissions: uses Auto-review when approval never is disabled" _test_configure_permissions_approval_never_disabled
+assert_ok "configure_codex_permissions: auto uses Ask when approval never is disabled" _test_configure_permissions_auto_uses_ask_when_approval_never_disabled
 assert_ok "codex_yolo_permission_config_arg: emits Codex override" _test_permission_config_arg
 
 section "configure_codex_sandbox — Sandbox fallback"
