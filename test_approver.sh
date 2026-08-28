@@ -4609,6 +4609,61 @@ _test_config_creates_toml() {
     return $result
 }
 
+_test_config_creates_runtime_defaults() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+
+    local config_file="$fake_home/.codex/config.toml" result=1
+    if grep -q '^approval_policy = "on-failure"$' "$config_file" && \
+       grep -q '^sandbox_mode = "workspace-write"$' "$config_file" && \
+       awk '
+           /^\[features\]$/ { in_features = 1; next }
+           /^\[/ { in_features = 0 }
+           in_features && /^shell_tool = true$/ { shell_tool = 1 }
+           in_features && /^unified_exec = true$/ { unified_exec = 1 }
+           END { exit shell_tool && unified_exec ? 0 : 1 }
+       ' "$config_file"; then
+        result=0
+    fi
+    rm -rf "$fake_home"
+    return $result
+}
+
+_test_config_reconciles_runtime_defaults() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+approval_policy = "never"
+sandbox_mode = "read-only"
+model = "gpt-5.5"
+
+[features]
+shell_tool = false
+unified_exec = false
+apps = true
+
+[tui]
+status_line = ["current-dir"]
+EOF
+
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 CODEX_YOLO_NO_PERMISSION_HOOK=1 ensure_codex_config 2>/dev/null
+
+    local config_file="$fake_home/.codex/config.toml" result=1
+    if [[ "$(grep -c '^approval_policy = "on-failure"$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^sandbox_mode = "workspace-write"$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^\[features\]$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^shell_tool = true$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^unified_exec = true$' "$config_file")" == "1" ]] && \
+       grep -q '^apps = true$' "$config_file" && \
+       grep -q '^model = "gpt-5.5"$' "$config_file"; then
+        result=0
+    fi
+    rm -rf "$fake_home"
+    return $result
+}
+
 _test_config_creates_tui_status_line() {
     local fake_home
     fake_home="$(mktemp -d)"
@@ -4693,7 +4748,12 @@ _test_config_preserves_existing_status_line() {
     fake_home="$(mktemp -d)"
     mkdir -p "$fake_home/.codex"
     cat > "$fake_home/.codex/config.toml" <<'EOF'
-approval_policy = "on-request"
+approval_policy = "on-failure"
+sandbox_mode = "workspace-write"
+
+[features]
+shell_tool = true
+unified_exec = true
 
 [tui]
 status_line = ["current-dir"]
@@ -4710,6 +4770,8 @@ EOF
 
 assert_ok "ensure_codex_config: creates .codex directory" _test_config_creates_dir
 assert_ok "ensure_codex_config: creates config.toml" _test_config_creates_toml
+assert_ok "ensure_codex_config: creates runtime defaults" _test_config_creates_runtime_defaults
+assert_ok "ensure_codex_config: reconciles runtime defaults" _test_config_reconciles_runtime_defaults
 assert_ok "ensure_codex_config: creates TUI status line" _test_config_creates_tui_status_line
 assert_ok "ensure_codex_config: idempotent after configuring TUI" _test_config_idempotent
 assert_ok "ensure_codex_config: appends TUI status line to existing config" _test_config_appends_tui_status_line_to_existing_config

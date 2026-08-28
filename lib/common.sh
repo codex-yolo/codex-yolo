@@ -595,6 +595,97 @@ codex_yolo_configure_tui_status_line() {
     log_info "Configured Codex TUI status line: $config_file"
 }
 
+# Keep the Codex settings required by codex-yolo in the user-level config.
+# Top-level keys must appear before the first TOML table, while feature flags
+# belong inside [features], so this cannot be implemented safely by blindly
+# appending a block. Reconcile existing values in place and insert missing
+# values at the appropriate table boundary instead.
+codex_yolo_configure_runtime_defaults() {
+    local config_file="$1"
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/codex-yolo-config.XXXXXX")" || return 1
+
+    if awk '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function print_missing_root() {
+            if (!have_approval) print "approval_policy = \"on-failure\""
+            if (!have_sandbox) print "sandbox_mode = \"workspace-write\""
+        }
+        function print_missing_features() {
+            if (!have_shell_tool) print "shell_tool = true"
+            if (!have_unified_exec) print "unified_exec = true"
+        }
+        {
+            raw = $0
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            line = trim(line)
+
+            if (line ~ /^\[/) {
+                if (!left_root) {
+                    print_missing_root()
+                    left_root = 1
+                }
+                if (in_features) {
+                    print_missing_features()
+                    in_features = 0
+                }
+
+                print raw
+                if (line ~ /^\[[[:space:]]*features[[:space:]]*\]$/) {
+                    have_features = 1
+                    in_features = 1
+                }
+                next
+            }
+
+            if (!left_root && line ~ /^approval_policy[[:space:]]*=/) {
+                if (!have_approval) print "approval_policy = \"on-failure\""
+                have_approval = 1
+                next
+            }
+            if (!left_root && line ~ /^sandbox_mode[[:space:]]*=/) {
+                if (!have_sandbox) print "sandbox_mode = \"workspace-write\""
+                have_sandbox = 1
+                next
+            }
+            if (in_features && line ~ /^shell_tool[[:space:]]*=/) {
+                if (!have_shell_tool) print "shell_tool = true"
+                have_shell_tool = 1
+                next
+            }
+            if (in_features && line ~ /^unified_exec[[:space:]]*=/) {
+                if (!have_unified_exec) print "unified_exec = true"
+                have_unified_exec = 1
+                next
+            }
+
+            print raw
+        }
+        END {
+            if (!left_root) print_missing_root()
+            if (in_features) print_missing_features()
+            if (!have_features) {
+                print ""
+                print "[features]"
+                print "shell_tool = true"
+                print "unified_exec = true"
+            }
+        }
+    ' "$config_file" > "$tmp" && cp "$tmp" "$config_file"; then
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+
+    log_info "Configured Codex runtime defaults: $config_file"
+}
+
 # The exact bell command. Defined once so the hook block and the trust entry
 # below stay in lockstep — Codex derives the trust hash from this string, so
 # the two MUST match byte-for-byte.
@@ -818,7 +909,6 @@ codex_yolo_configure_stop_bell() {
 }
 
 # Ensure the Codex CLI config directory, config.toml, and codex-yolo defaults exist.
-# Does NOT override approval_policy (the daemon handles prompts at the terminal level).
 ensure_codex_config() {
     local config_dir="$HOME/.codex"
     local config_file="$config_dir/config.toml"
@@ -828,9 +918,7 @@ ensure_codex_config() {
         log_info "Created Codex config directory: $config_dir"
     fi
 
-    # If no config exists, create a minimal one with default approval policy.
-    # We do NOT set approval_policy=never because the daemon approach is
-    # more flexible — it auto-approves while preserving sandbox protection.
+    # If no config exists, create it before reconciling the runtime defaults.
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" <<'TOML'
 # Codex CLI configuration — managed by codex-yolo
@@ -840,6 +928,7 @@ TOML
         log_info "Created minimal Codex config: $config_file"
     fi
 
+    codex_yolo_configure_runtime_defaults "$config_file"
     codex_yolo_configure_tui_status_line "$config_file"
 
     # Ring the terminal bell when an agent finishes its turn. Opt out with

@@ -9,6 +9,18 @@ Run parallel OpenAI Codex CLI agents in tmux with automatic permission approval.
 
 Codex CLI can prompt before commands leave the workspace sandbox or require other elevated permissions. Standard agent windows now start in **Ask for approval** mode (`workspace-write`, `on-request`, user review); the tmux approver daemon handles those prompts at the terminal level.
 
+On launch, codex-yolo also reconciles these user-level defaults in
+`~/.codex/config.toml` (existing unrelated settings are preserved):
+
+```toml
+approval_policy = "on-failure"
+sandbox_mode = "workspace-write"
+
+[features]
+shell_tool = true
+unified_exec = true
+```
+
 ## Table of contents
 
 - [Installation](#installation)
