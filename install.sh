@@ -211,6 +211,16 @@ codex_release_asset_name() {
     esac
 }
 
+# Code Mode is shipped as a separate, version-matched release artifact. Keep
+# its target suffix in lockstep with the main Codex binary so standalone
+# installs have the complete runtime instead of failing when the first command
+# is delegated to Code Mode.
+codex_code_mode_host_asset_name() {
+    local codex_asset
+    codex_asset="$(codex_release_asset_name "$1" "$2")" || return 1
+    printf '%s\n' "codex-code-mode-host-${codex_asset#codex-}"
+}
+
 # Parse the installed Codex CLI version from `codex --version` output.
 # Expected format: "codex-cli 0.128.0" → "0.128.0".
 codex_installed_version() {
@@ -323,12 +333,54 @@ install_codex_release_binary() {
     hash -r 2>/dev/null || true
 
     if codex_cli_works; then
-        return 0
+        if install_codex_release_code_mode_host "$(codex_tag_to_version "$tag")"; then
+            return 0
+        fi
+
+        warn "Codex CLI installed, but its matching Code Mode host could not be installed"
+        rm -f "$BIN_DIR/codex"
+        hash -r 2>/dev/null || true
+        return 1
     fi
 
     rm -f "$BIN_DIR/codex"
     hash -r 2>/dev/null || true
     return 1
+}
+
+install_codex_release_code_mode_host() {
+    local version="${1:-}" asset tag archive_url tmp_dir archive extracted staged
+
+    [[ "$IS_TERMUX" -eq 0 ]] || return 1
+    command -v curl &>/dev/null || return 1
+    command -v tar &>/dev/null || return 1
+
+    [[ -n "$version" ]] || version="$(codex_installed_version 2>/dev/null || true)"
+    [[ -n "$version" ]] || return 1
+
+    asset="$(codex_code_mode_host_asset_name "$OS" "$(uname -m)")" || return 1
+    tag="rust-v${version}"
+    archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
+    tmp_dir="$(mktemp -d)" || return 1
+    archive="$tmp_dir/code-mode-host.tar.gz"
+    extracted="$tmp_dir/$asset"
+    staged="$BIN_DIR/.codex-code-mode-host.tmp.$$"
+
+    if ! curl -fsSL --retry 2 "$archive_url" -o "$archive" \
+       || ! tar -xzf "$archive" -C "$tmp_dir" \
+       || [[ ! -f "$extracted" ]] \
+       || ! cp "$extracted" "$staged" \
+       || ! chmod +x "$staged" \
+       || ! "$staged" --help &>/dev/null \
+       || ! mv -f "$staged" "$BIN_DIR/codex-code-mode-host"; then
+        rm -f "$staged"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    rm -rf "$tmp_dir"
+    hash -r 2>/dev/null || true
+    return 0
 }
 
 git_install_dir() {
@@ -597,6 +649,19 @@ elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
         else
             info "Codex CLI target is $TARGET_VERSION (installed: $INSTALLED_VERSION), but '$(command -v codex)' is not managed by this installer — leaving it unchanged. Set CODEX_YOLO_SKIP_CODEX_UPGRADE=1 to silence."
         fi
+    fi
+fi
+
+# Older codex-yolo standalone installs copied only the main executable. Repair
+# those installations on the next installer run even when the pinned Codex
+# version itself has not changed.
+if codex_install_is_ours && ! command_runnable "$BIN_DIR/codex-code-mode-host" --help; then
+    INSTALLED_VERSION="$(codex_installed_version 2>/dev/null || true)"
+    info "Installing Codex Code Mode host ${INSTALLED_VERSION:+$INSTALLED_VERSION}"
+    if install_codex_release_code_mode_host "$INSTALLED_VERSION"; then
+        info "Codex Code Mode host installed"
+    else
+        warn "Could not install codex-code-mode-host; Code Mode command execution will be unavailable"
     fi
 fi
 

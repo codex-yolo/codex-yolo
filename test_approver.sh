@@ -115,7 +115,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source install-time helpers without running the installer.
-eval "$(sed -n '/^DEFAULT_CODEX_/p; /^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^codex_tag_to_version()/,/^}/p; /^codex_target_tag()/,/^}/p; /^codex_target_version()/,/^}/p; /^codex_target_npm_package()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+eval "$(sed -n '/^DEFAULT_CODEX_/p; /^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^codex_code_mode_host_asset_name()/,/^}/p; /^codex_tag_to_version()/,/^}/p; /^codex_target_tag()/,/^}/p; /^codex_target_version()/,/^}/p; /^codex_target_npm_package()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
@@ -146,6 +146,19 @@ assert_contains "Bubblewrap: installer installs the distribution package" \
 assert_contains "Bubblewrap: installer links the official prerequisites" \
   "$_installer_source" \
   'https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites'
+
+assert_eq "Code Mode host: Linux x86_64 release asset" \
+  "codex-code-mode-host-x86_64-unknown-linux-musl" \
+  "$(codex_code_mode_host_asset_name Linux x86_64)"
+assert_eq "Code Mode host: macOS arm64 release asset" \
+  "codex-code-mode-host-aarch64-apple-darwin" \
+  "$(codex_code_mode_host_asset_name Darwin arm64)"
+assert_contains "Code Mode host: standalone installer downloads companion" \
+  "$_installer_source" \
+  'install_codex_release_code_mode_host "$(codex_tag_to_version "$tag")"'
+assert_contains "Code Mode host: installer repairs older standalone installs" \
+  "$_installer_source" \
+  '! command_runnable "$BIN_DIR/codex-code-mode-host" --help'
 
 _out="$(codex_yolo_warn_bwrap_prerequisites 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' 2>&1)"
 assert_contains "Bubblewrap: RTM_NEWADDR failure links the official guide" \
@@ -4622,7 +4635,8 @@ _test_config_creates_runtime_defaults() {
            /^\[/ { in_features = 0 }
            in_features && /^shell_tool = true$/ { shell_tool = 1 }
            in_features && /^unified_exec = true$/ { unified_exec = 1 }
-           END { exit shell_tool && unified_exec ? 0 : 1 }
+           in_features && /^code_mode_host = true$/ { code_mode_host = 1 }
+           END { exit shell_tool && unified_exec && code_mode_host ? 0 : 1 }
        ' "$config_file"; then
         result=0
     fi
@@ -4642,6 +4656,7 @@ model = "gpt-5.5"
 [features]
 shell_tool = false
 unified_exec = false
+code_mode_host = false
 apps = true
 
 [tui]
@@ -4656,6 +4671,7 @@ EOF
        [[ "$(grep -c '^\[features\]$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^shell_tool = true$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^unified_exec = true$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^code_mode_host = true$' "$config_file")" == "1" ]] && \
        grep -q '^apps = true$' "$config_file" && \
        grep -q '^model = "gpt-5.5"$' "$config_file"; then
         result=0
@@ -4754,6 +4770,7 @@ sandbox_mode = "workspace-write"
 [features]
 shell_tool = true
 unified_exec = true
+code_mode_host = true
 
 [tui]
 status_line = ["current-dir"]

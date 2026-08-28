@@ -618,6 +618,7 @@ codex_yolo_configure_runtime_defaults() {
         function print_missing_features() {
             if (!have_shell_tool) print "shell_tool = true"
             if (!have_unified_exec) print "unified_exec = true"
+            if (!have_code_mode_host) print "code_mode_host = true"
         }
         {
             raw = $0
@@ -663,6 +664,11 @@ codex_yolo_configure_runtime_defaults() {
                 have_unified_exec = 1
                 next
             }
+            if (in_features && line ~ /^code_mode_host[[:space:]]*=/) {
+                if (!have_code_mode_host) print "code_mode_host = true"
+                have_code_mode_host = 1
+                next
+            }
 
             print raw
         }
@@ -674,6 +680,7 @@ codex_yolo_configure_runtime_defaults() {
                 print "[features]"
                 print "shell_tool = true"
                 print "unified_exec = true"
+                print "code_mode_host = true"
             }
         }
     ' "$config_file" > "$tmp" && cp "$tmp" "$config_file"; then
