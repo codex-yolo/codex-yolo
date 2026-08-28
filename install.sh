@@ -20,6 +20,8 @@ BIN_DIR="$REQUESTED_BIN_DIR"
 NPM_PREFIX="${CODEX_YOLO_NPM_PREFIX:-$HOME/.local}"
 NPM_BIN_DIR="$NPM_PREFIX/bin"
 ORIGINAL_PATH="${PATH:-}"
+DEFAULT_CODEX_VERSION="0.149.1"
+DEFAULT_CODEX_TAG="rust-v${DEFAULT_CODEX_VERSION}"
 
 # Make user-prefix npm installs visible during this script, not just after it.
 export PATH="$BIN_DIR:$NPM_BIN_DIR:$ORIGINAL_PATH"
@@ -230,6 +232,20 @@ codex_tag_to_version() {
     printf '%s\n' "$tag"
 }
 
+# Keep Codex on the known-compatible release unless the caller explicitly
+# selects another release tag.
+codex_target_tag() {
+    printf '%s\n' "${CODEX_YOLO_CODEX_VERSION:-$DEFAULT_CODEX_TAG}"
+}
+
+codex_target_version() {
+    codex_tag_to_version "$(codex_target_tag)"
+}
+
+codex_target_npm_package() {
+    printf '%s\n' "@openai/codex@$(codex_target_version)"
+}
+
 # True iff `codex` on PATH resolves to a file we placed in $BIN_DIR.
 # This protects npm/brew/system installs from being silently clobbered.
 codex_install_is_ours() {
@@ -275,21 +291,9 @@ install_codex_release_binary() {
 
     asset="$(codex_release_asset_name "$OS" "$(uname -m)")" || return 1
 
-    tag="${CODEX_YOLO_CODEX_VERSION:-}"
-    if [[ -n "$tag" ]]; then
-        info "Using pinned Codex CLI release: $tag"
-    elif tag="$(codex_latest_stable_tag)" && [[ -n "$tag" ]]; then
-        info "Latest stable Codex CLI release: $tag"
-    else
-        warn "Could not resolve latest stable Codex CLI tag — falling back to /releases/latest redirect"
-        tag=""
-    fi
-
-    if [[ -n "$tag" ]]; then
-        archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
-    else
-        archive_url="https://github.com/openai/codex/releases/latest/download/${asset}.tar.gz"
-    fi
+    tag="$(codex_target_tag)"
+    info "Using pinned Codex CLI release: $tag"
+    archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
     tmp_dir="$(mktemp -d)" || return 1
     archive="$tmp_dir/codex.tar.gz"
     extracted="$tmp_dir/$asset"
@@ -554,7 +558,7 @@ if codex_cli_needs_install; then
     if [[ "$CODEX_INSTALLED" -eq 0 && "$CODEX_INSTALL_METHOD" != "release" ]]; then
         if _ensure_npm; then
             _npm_uninstall_codex_variants
-            _npm_global_install @openai/codex && CODEX_INSTALLED=1
+            _npm_global_install "$(codex_target_npm_package)" && CODEX_INSTALLED=1
         else
             warn "Node.js/npm are not available or not runnable — cannot install Codex CLI with npm"
         fi
@@ -575,30 +579,23 @@ if codex_cli_needs_install; then
     if ! codex_cli_works; then
         warn_codex_cli_failure
         ARCH="$(uname -m)"
-        error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Try the standalone GitHub release or install Node.js/npm, then run: npm install -g @openai/codex"
+        error "Codex CLI could not be installed or repaired (platform: $OS, arch: $ARCH). Try the standalone GitHub release or install Node.js/npm, then run: npm install -g $(codex_target_npm_package)"
     fi
 elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
     # Codex is installed and works — check for an upgrade.
     INSTALLED_VERSION="$(codex_installed_version 2>/dev/null || true)"
-    TARGET_TAG="${CODEX_YOLO_CODEX_VERSION:-}"
-    if [[ -z "$TARGET_TAG" ]]; then
-        TARGET_TAG="$(codex_latest_stable_tag 2>/dev/null || true)"
-    fi
-    TARGET_VERSION=""
-    if [[ -n "$TARGET_TAG" ]]; then
-        TARGET_VERSION="$(codex_tag_to_version "$TARGET_TAG")"
-    fi
+    TARGET_VERSION="$(codex_target_version)"
 
     if [[ -n "$INSTALLED_VERSION" && -n "$TARGET_VERSION" && "$INSTALLED_VERSION" != "$TARGET_VERSION" ]]; then
         if codex_install_is_ours; then
-            info "Upgrading Codex CLI: $INSTALLED_VERSION → $TARGET_VERSION"
+            info "Setting Codex CLI version: $INSTALLED_VERSION → $TARGET_VERSION"
             if install_codex_release_binary; then
-                info "Codex CLI upgraded to $TARGET_VERSION"
+                info "Codex CLI set to $TARGET_VERSION"
             else
-                warn "Codex CLI upgrade failed; keeping installed version $INSTALLED_VERSION"
+                warn "Codex CLI version change failed; keeping installed version $INSTALLED_VERSION"
             fi
         else
-            info "Codex CLI $TARGET_VERSION is available (installed: $INSTALLED_VERSION), but '$(command -v codex)' is not managed by this installer — skipping upgrade. Set CODEX_YOLO_SKIP_CODEX_UPGRADE=1 to silence."
+            info "Codex CLI target is $TARGET_VERSION (installed: $INSTALLED_VERSION), but '$(command -v codex)' is not managed by this installer — leaving it unchanged. Set CODEX_YOLO_SKIP_CODEX_UPGRADE=1 to silence."
         fi
     fi
 fi

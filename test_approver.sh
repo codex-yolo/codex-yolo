@@ -115,7 +115,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source install-time helpers without running the installer.
-eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+eval "$(sed -n '/^DEFAULT_CODEX_/p; /^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^codex_tag_to_version()/,/^}/p; /^codex_target_tag()/,/^}/p; /^codex_target_version()/,/^}/p; /^codex_target_npm_package()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
@@ -5232,6 +5232,20 @@ _test_install_helper_rejects_unknown_release_asset() {
     ! codex_release_asset_name FreeBSD x86_64 >/dev/null
 }
 
+_test_install_helper_default_codex_pin() (
+    unset CODEX_YOLO_CODEX_VERSION
+    [[ "$(codex_target_tag)" == "rust-v0.149.1" ]] &&
+        [[ "$(codex_target_version)" == "0.149.1" ]] &&
+        [[ "$(codex_target_npm_package)" == "@openai/codex@0.149.1" ]]
+)
+
+_test_install_helper_codex_pin_override() (
+    CODEX_YOLO_CODEX_VERSION="rust-v9.8.7"
+    [[ "$(codex_target_tag)" == "rust-v9.8.7" ]] &&
+        [[ "$(codex_target_version)" == "9.8.7" ]] &&
+        [[ "$(codex_target_npm_package)" == "@openai/codex@9.8.7" ]]
+)
+
 assert_ok "install helper: missing codex needs install" _test_install_helper_missing_codex_needs_install
 assert_ok "install helper: runnable codex skips install" _test_install_helper_runnable_codex_skips_install
 assert_ok "install helper: broken codex needs install" _test_install_helper_broken_codex_needs_install
@@ -5242,6 +5256,8 @@ assert_ok "install helper: Linux x64 release asset" _test_install_helper_linux_x
 assert_ok "install helper: Linux arm64 release asset" _test_install_helper_linux_arm64_release_asset
 assert_ok "install helper: macOS arm64 release asset" _test_install_helper_macos_arm64_release_asset
 assert_ok "install helper: unknown release asset rejected" _test_install_helper_rejects_unknown_release_asset
+assert_ok "install helper: Codex defaults to pinned 0.149.1" _test_install_helper_default_codex_pin
+assert_ok "install helper: Codex pin can be overridden" _test_install_helper_codex_pin_override
 
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
