@@ -121,6 +121,12 @@ eval "$(sed -n '/^DEFAULT_CODEX_/p; /^command_runnable()/,/^}/p; /^node_runtime_
 eval "$(sed -n '/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
 
 # Source build_agent_cmd from the launcher
+eval "$(sed -n '/^codex_yolo_process_ancestors()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^codex_yolo_detect_tmux_socket()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^codex_yolo_init_tmux_socket()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^tmux_run()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^tmux_current_client()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
+eval "$(sed -n '/^tmux_attach()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^codex_yolo_should_reconcile_auto_review()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^build_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
 eval "$(sed -n '/^build_exec_agent_cmd()/,/^}/p' "$SCRIPT_DIR/codex-yolo")"
@@ -5418,6 +5424,69 @@ _test_help_sandbox_options() {
     [[ "$output" == *"--permissions"* ]]
 }
 assert_ok "launcher: --help shows Codex sandbox options" _test_help_sandbox_options
+
+_test_tmux_run_reuses_current_named_server() (
+    local socket_name="codex-yolo-named-test-$$-$RANDOM"
+    local parent_session="parent-$$-$RANDOM"
+    local child_session="child-$$-$RANDOM"
+    local socket_path server_pid wrong_socket parent_pane
+
+    _cleanup_named_tmux_test() {
+        tmux -L "$socket_name" kill-server 2>/dev/null || true
+    }
+    trap _cleanup_named_tmux_test EXIT
+
+    tmux -L "$socket_name" new-session -d -s "$parent_session" || return 1
+    socket_path="$(tmux -L "$socket_name" display-message -p -t "$parent_session" '#{socket_path}')" || return 1
+    server_pid="$(tmux -L "$socket_name" display-message -p -t "$parent_session" '#{pid}')" || return 1
+    parent_pane="$(tmux -L "$socket_name" display-message -p -t "$parent_session" '#{pane_id}')" || return 1
+
+    # Reproduce control-mode clients whose pane retained the default TMUX
+    # socket even though its owning server is a named `tmux -L` server.
+    wrong_socket="${socket_path%/*}/default"
+    TMUX="$wrong_socket,1,0"
+    TMUX_PANE="$parent_pane"
+    codex_yolo_init_tmux_socket "$server_pid"
+    [[ "$CODEX_YOLO_TMUX_SOCKET" == "$socket_path" ]] || return 1
+    [[ "$TMUX" == "$socket_path,$server_pid,"* ]] || return 1
+
+    tmux_run new-session -d -s "$child_session" || return 1
+    tmux -L "$socket_name" has-session -t "$child_session" 2>/dev/null
+)
+assert_ok "launcher: nested launch reuses current named tmux server" \
+    _test_tmux_run_reuses_current_named_server
+
+_test_tmux_attach_targets_current_named_server() {
+    local fake_path output socket_path="/tmp/tmux-1000/non-default"
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/tmux" \
+        'case "$*" in' \
+        '  *"display-message"*) printf "%s\n" "\$7" ;;' \
+        '  *"list-clients"*) printf "%s\n" "100|/dev/pts/3" "200|/dev/pts/8" ;;' \
+        '  *) printf "%s\n" "$*" ;;' \
+        'esac'
+
+    output="$(PATH="$fake_path:$PATH" TMUX="$socket_path,1234,7" TMUX_PANE="%9" \
+        tmux_attach codex-yolo-test)"
+    rm -rf "$fake_path"
+
+    [[ "$output" == "-S $socket_path switch-client -c /dev/pts/8 -t codex-yolo-test" ]]
+}
+assert_ok "launcher: nested attach switches client on current named tmux server" \
+    _test_tmux_attach_targets_current_named_server
+
+_test_tmux_run_without_parent_uses_default_server() {
+    local fake_path output
+    fake_path="$(mktemp -d)"
+    _write_test_executable "$fake_path/tmux" 'printf "%s\n" "$*"'
+
+    output="$(PATH="$fake_path:$PATH" TMUX="" tmux_run list-sessions)"
+    rm -rf "$fake_path"
+
+    [[ "$output" == "list-sessions" ]]
+}
+assert_ok "launcher: launch outside tmux keeps default server behavior" \
+    _test_tmux_run_without_parent_uses_default_server
 
 assert_fail "launcher: -d nonexistent path fails" \
     bash "$SCRIPT_DIR/codex-yolo" -d /nonexistent/path/xyz "task"
