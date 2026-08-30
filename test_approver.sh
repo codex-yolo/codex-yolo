@@ -136,9 +136,9 @@ source "$SCRIPT_DIR/lib/control-pane.sh" "" "" "standard"
 
 section "Codex permissions default"
 
-assert_contains "Permissions: launcher defaults to Approve for me" \
+assert_contains "Permissions: launcher defaults to Ask for approval" \
   "$(sed -n '/local codex_permissions_policy=/p' "$SCRIPT_DIR/codex-yolo")" \
-  'CODEX_YOLO_PERMISSIONS:-auto-review'
+  'CODEX_YOLO_PERMISSIONS:-auto'
 
 section "Bubblewrap prerequisites"
 
@@ -1777,6 +1777,9 @@ assert_fail "Cooldown: pane %2 approved 10s ago, not in cooldown" \
 section "build_agent_cmd — Command construction"
 
 CODEX_YOLO_PERMISSION_PROFILE=""
+CODEX_YOLO_ASK_FOR_APPROVAL=0
+CODEX_YOLO_APPROVALS_REVIEWER="user"
+CODEX_YOLO_NETWORK_ACCESS=1
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 CODEX_YOLO_FAKE_BWRAP_DIR=""
@@ -1784,15 +1787,15 @@ CODEX_YOLO_FAKE_BWRAP_ENABLED=0
 
 _out="$(build_agent_cmd "" "fix the bug")"
 assert_eq "build_agent_cmd: no model" \
-    "codex --sandbox workspace-write 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "fix the bug")"
 assert_eq "build_agent_cmd: with model" \
-    "codex --sandbox workspace-write --model o4-mini 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model o4-mini 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "gpt-4.1" "it's a test")"
 assert_eq "build_agent_cmd: single-quote escaping" \
-    "codex --sandbox workspace-write --model gpt-4.1 'it'\\''s a test'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-4.1 'it'\\''s a test'" "$_out"
 
 _out="$(build_agent_cmd "" "simple task")"
 assert_contains "build_agent_cmd: starts with codex" "$_out" "codex"
@@ -1802,16 +1805,16 @@ assert_contains "build_agent_cmd: model flag present" "$_out" "--model o3"
 
 _out="$(build_agent_cmd "" "task with \"double quotes\"")"
 assert_eq "build_agent_cmd: double quotes preserved" \
-    "codex --sandbox workspace-write 'task with \"double quotes\"'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' 'task with \"double quotes\"'" "$_out"
 
 # Interactive mode (no task)
 _out="$(build_agent_cmd "" "")"
 assert_eq "build_agent_cmd: interactive mode" \
-    "codex --sandbox workspace-write" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true'" "$_out"
 
 _out="$(build_agent_cmd "o4-mini" "")"
 assert_eq "build_agent_cmd: interactive with model" \
-    "codex --sandbox workspace-write --model o4-mini" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model o4-mini" "$_out"
 
 CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
 _out="$(build_agent_cmd "" "fix the bug")"
@@ -1830,7 +1833,7 @@ CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=1
 _out="$(build_agent_cmd "o4-mini" "fix the bug")"
 assert_eq "build_agent_cmd: forced Codex sandbox uses workspace-write" \
-    "codex --sandbox workspace-write --model o4-mini 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model o4-mini 'fix the bug'" "$_out"
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
@@ -1838,43 +1841,43 @@ CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 # Reasoning effort rides along as a -c override, after the model
 _out="$(build_agent_cmd "gpt-5.6-sol" "fix the bug" "xhigh")"
 assert_eq "build_agent_cmd: effort after model" \
-    "codex --sandbox workspace-write --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "" "task" "max")"
 assert_eq "build_agent_cmd: effort without model" \
-    "codex --sandbox workspace-write -c 'model_reasoning_effort=\"max\"' 'task'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' -c 'model_reasoning_effort=\"max\"' 'task'" "$_out"
 
 _out="$(build_agent_cmd "gpt-5.5" "" "xhigh")"
 assert_eq "build_agent_cmd: effort in interactive mode" \
-    "codex --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'" "$_out"
 
 _out="$(build_agent_cmd "gpt-5.5" "task" "")"
 assert_eq "build_agent_cmd: empty effort omits the override" \
-    "codex --sandbox workspace-write --model gpt-5.5 'task'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.5 'task'" "$_out"
 
 # The waiting dir rides along as a pane-environment assignment so the
 # PermissionRequest hook (static command, see common.sh) can find it
 _out="$(build_agent_cmd "gpt-5.5" "task" "xhigh" "/tmp/cy.log.waiting")"
 assert_eq "build_agent_cmd: waiting dir env + model + effort" \
-    "CODEX_YOLO_WAITING_DIR='/tmp/cy.log.waiting' codex --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'task'" "$_out"
+    "CODEX_YOLO_WAITING_DIR='/tmp/cy.log.waiting' codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'task'" "$_out"
 
 _out="$(build_agent_cmd "" "" "" "/tmp/it's.waiting")"
 assert_eq "build_agent_cmd: waiting dir single-quote escaping" \
-    "CODEX_YOLO_WAITING_DIR='/tmp/it'\\''s.waiting' codex --sandbox workspace-write" "$_out"
+    "CODEX_YOLO_WAITING_DIR='/tmp/it'\\''s.waiting' codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true'" "$_out"
 
 section "build_exec_agent_cmd — Worktree command construction"
 
 _out="$(build_exec_agent_cmd "" "fix the bug")"
 assert_eq "build_exec_agent_cmd: no model" \
-    "codex exec --sandbox workspace-write 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
 assert_eq "build_exec_agent_cmd: with model" \
-    "codex exec --sandbox workspace-write --model gpt-5 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "o3" "it's a test")"
 assert_eq "build_exec_agent_cmd: single-quote escaping" \
-    "codex exec --sandbox workspace-write --model o3 'it'\\''s a test'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model o3 'it'\\''s a test'" "$_out"
 
 _out="$(build_exec_agent_cmd "" "task")"
 assert_contains "build_exec_agent_cmd: uses codex exec" "$_out" "codex exec"
@@ -1895,18 +1898,18 @@ CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=1
 _out="$(build_exec_agent_cmd "gpt-5" "fix the bug")"
 assert_eq "build_exec_agent_cmd: forced Codex sandbox keeps sandboxed exec" \
-    "codex exec --sandbox workspace-write --model gpt-5 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5 'fix the bug'" "$_out"
 
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 
 _out="$(build_exec_agent_cmd "gpt-5.5" "fix the bug" "xhigh")"
 assert_eq "build_exec_agent_cmd: effort after model" \
-    "codex exec --sandbox workspace-write --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "" "task" "")"
 assert_eq "build_exec_agent_cmd: empty effort omits the override" \
-    "codex exec --sandbox workspace-write 'task'" "$_out"
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' 'task'" "$_out"
 
 CODEX_YOLO_FAKE_BWRAP_DIR=""
 CODEX_YOLO_FAKE_BWRAP_ENABLED=0
@@ -4348,8 +4351,12 @@ _test_configure_permissions_auto_ignores_full_access_availability() {
 
 _test_configure_permissions_auto_review_alias() {
     CODEX_YOLO_PERMISSION_PROFILE=""
+    CODEX_YOLO_ASK_FOR_APPROVAL=0
+    CODEX_YOLO_APPROVALS_REVIEWER="user"
     configure_codex_permissions auto-review >/dev/null 2>&1 && \
-    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]]
+    [[ "$CODEX_YOLO_PERMISSION_PROFILE" == "codex-auto-review" ]] && \
+    [[ "$CODEX_YOLO_ASK_FOR_APPROVAL" == "1" ]] && \
+    [[ "$CODEX_YOLO_APPROVALS_REVIEWER" == "auto_review" ]]
 }
 
 _test_full_access_disabled_by_requirements_cache() {
@@ -4421,14 +4428,15 @@ JSON
 }
 
 _test_permission_config_arg() {
-    CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
-    CODEX_YOLO_ASK_FOR_APPROVAL=0
+    configure_codex_permissions auto-review >/dev/null 2>&1
     CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
+    CODEX_YOLO_NETWORK_ACCESS=1
     local output
     output="$(codex_yolo_permission_config_arg)"
     CODEX_YOLO_PERMISSION_PROFILE=""
     CODEX_YOLO_ASK_FOR_APPROVAL=0
-    [[ "$output" == "-c 'permission_profile=\"codex-auto-review\"' " ]]
+    CODEX_YOLO_APPROVALS_REVIEWER="user"
+    [[ "$output" == "--sandbox workspace-write --ask-for-approval on-request -c 'approvals_reviewer=\"auto_review\"' -c 'sandbox_workspace_write.network_access=true' " ]]
 }
 
 assert_ok "configure_codex_permissions: auto uses Ask for approval" _test_configure_permissions_auto_uses_ask_for_approval
@@ -4438,7 +4446,7 @@ assert_ok "configure_codex_permissions: accepts auto-review alias" _test_configu
 assert_ok "codex_yolo_full_access_allowed: honors requirements cache" _test_full_access_disabled_by_requirements_cache
 assert_ok "codex_yolo_full_access_allowed: honors approval policy requirements cache" _test_full_access_disabled_by_approval_requirements_cache
 assert_ok "configure_codex_permissions: auto uses Ask when approval never is disabled" _test_configure_permissions_auto_uses_ask_when_approval_never_disabled
-assert_ok "codex_yolo_permission_config_arg: emits Codex override" _test_permission_config_arg
+assert_ok "codex_yolo_permission_config_arg: emits Auto-review and network overrides" _test_permission_config_arg
 
 section "configure_codex_sandbox — Sandbox fallback"
 
@@ -4639,7 +4647,7 @@ _test_config_creates_runtime_defaults() {
     HOME="$fake_home" ensure_codex_config 2>/dev/null
 
     local config_file="$fake_home/.codex/config.toml" result=1
-    if grep -q '^approval_policy = "on-failure"$' "$config_file" && \
+    if grep -q '^approval_policy = "on-request"$' "$config_file" && \
        grep -q '^sandbox_mode = "workspace-write"$' "$config_file" && \
        awk '
            /^\[features\]$/ { in_features = 1; next }
@@ -4677,7 +4685,7 @@ EOF
     HOME="$fake_home" CODEX_YOLO_NO_BELL=1 CODEX_YOLO_NO_PERMISSION_HOOK=1 ensure_codex_config 2>/dev/null
 
     local config_file="$fake_home/.codex/config.toml" result=1
-    if [[ "$(grep -c '^approval_policy = "on-failure"$' "$config_file")" == "1" ]] && \
+    if [[ "$(grep -c '^approval_policy = "on-request"$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^sandbox_mode = "workspace-write"$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^\[features\]$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^shell_tool = true$' "$config_file")" == "1" ]] && \
@@ -4775,7 +4783,7 @@ _test_config_preserves_existing_status_line() {
     fake_home="$(mktemp -d)"
     mkdir -p "$fake_home/.codex"
     cat > "$fake_home/.codex/config.toml" <<'EOF'
-approval_policy = "on-failure"
+approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 
 [features]

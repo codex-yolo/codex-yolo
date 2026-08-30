@@ -7,13 +7,13 @@
 
 Run parallel OpenAI Codex CLI agents in tmux with automatic permission approval. Optionally isolate each agent in its own git worktree with real-time merge conflict detection and automated conflict resolution.
 
-Codex CLI can prompt before commands leave the workspace sandbox or require other elevated permissions. Standard agent windows now start in **Ask for approval** mode (`workspace-write`, `on-request`, user review); the tmux approver daemon handles those prompts at the terminal level.
+Codex CLI can prompt before commands leave the workspace sandbox or require other elevated permissions. Standard agent windows start in **Ask for approval** mode (`workspace-write`, `on-request`, user review); the tmux approver daemon handles those prompts at the terminal level. Command network access is enabled inside that sandbox by default so tools such as `git`, `gh`, package managers, and `curl` can reach public websites.
 
 On launch, codex-yolo also reconciles these user-level defaults in
 `~/.codex/config.toml` (existing unrelated settings are preserved):
 
 ```toml
-approval_policy = "on-failure"
+approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 
 [features]
@@ -219,7 +219,7 @@ When the launch also kicks off Codex Auto-review reconciliation (i.e. interactiv
 
 ## Options
 
-The default permissions mode is **Ask for approval** (`workspace-write`, `on-request`, user review). Use `--permissions ask-for-approval` to request it explicitly; existing `full-access`, `auto-review`, and `none` overrides remain available.
+The default permissions mode is **Ask for approval** (`workspace-write`, `on-request`, user review). Command network access is enabled by default; use `--no-network` when a run should remain offline. Existing `full-access`, `auto-review`, and `none` permission overrides remain available.
 
 ```
 -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
@@ -237,7 +237,9 @@ The default permissions mode is **Ask for approval** (`workspace-write`, `on-req
                       Must start with '/'. Multi-line strings are sent as a paste.
                       Works with --resume to inject into an existing session.
 -r, --resume          Re-attach to an existing yolo session
-    --permissions PROFILE Set Codex /permissions profile (default: auto-review / "Approve for me")
+    --permissions PROFILE Set Codex permissions mode (default: ask-for-approval)
+    --network             Enable command network access (default)
+    --no-network          Disable command network access
 --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
 --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
 -h, --help            Show help
@@ -263,14 +265,15 @@ executes the command after bubblewrap's `--` separator directly, so it should
 only be used inside an externally isolated container. Use
 `--force-codex-sandbox` to require the real sandbox and surface failures instead.
 
-For Codex `/permissions`, `codex-yolo` defaults to **Approve for me** (the
-`codex-auto-review` profile). Explicit overrides remain available with
-`--permissions full-access`, `--permissions auto-review`, or `--permissions none`.
-`CODEX_YOLO_PERMISSIONS=auto` selects Full Access when allowed and Auto-review otherwise.
-also uses Auto-review. Override this with `--permissions
-full-access`, `--permissions auto-review`, or `--permissions none`. For
-standard interactive Auto-review sessions, `codex-yolo` also reconciles the TUI
-once at startup so `/permissions` shows `Auto-review (current)`.
+For Codex `/permissions`, `codex-yolo` defaults to **Ask for approval**. The
+launcher passes `sandbox_workspace_write.network_access=true` directly to every
+sandboxed agent rather than changing the network behavior of ordinary Codex
+sessions outside `codex-yolo`. Set `CODEX_YOLO_NETWORK_ACCESS=0` or pass
+`--no-network` to opt out. Explicit permission overrides remain available with
+`--permissions full-access`, `--permissions auto-review`, or
+`--permissions none`. For explicit interactive Auto-review sessions,
+`codex-yolo` also reconciles the TUI once at startup so `/permissions` shows
+`Auto-review (current)`.
 
 `codex-yolo` also configures a Codex `Stop` lifecycle hook in `~/.codex/config.toml`
 that rings the terminal bell when an agent finishes its turn, so you get an
@@ -294,7 +297,7 @@ untouched. Opt out with `CODEX_YOLO_NO_PERMISSION_HOOK=1`.
 
 ## How it works
 
-1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task. Standard sessions default to `workspace-write` with `on-request` approvals; `--yolo` is reserved for an explicit Full Access selection. Worktree mode uses `codex exec`. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
+1. **Launcher** (`codex-yolo`) creates a tmux session and spawns one window per task. Standard sessions default to `workspace-write` with `on-request` approvals and command network access enabled; `--no-network` opts out. Full Access remains explicit. Worktree mode uses `codex exec`. If the Codex Linux sandbox is unavailable, launch commands include Codex's no-sandbox bypass flag.
 2. **Control pane** (`lib/control-pane.sh`) opens the `control` window, tails the audit log, and handles slash commands such as `/loop` and `/permissions auto-review`.
 3. **Approver daemon** (`lib/approver-daemon.sh`) runs in the background, polling every 0.3s. For each pane it:
    - Captures visible content via `tmux capture-pane`
@@ -434,7 +437,7 @@ The test suite covers:
 - **Git worktree isolation** — Each agent can work in its own branch and worktree, then merge back into the base branch.
 - **Real-time conflict detection** — A background daemon polls `git merge-tree` across all branch pairs and logs conflicts as they emerge.
 - **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
-- **Requirements-compatible defaults** — Standard sessions omit `--yolo` and request `workspace-write` with `on-request` approvals, avoiding managed-policy fallback warnings. Explicit Full Access remains available for isolated environments where broad command execution is acceptable.
+- **Requirements-compatible defaults** — Standard sessions omit `--yolo`, request `workspace-write` with `on-request` approvals, and explicitly enable sandboxed command networking. Explicit Full Access remains available for isolated environments where broad command execution is acceptable.
 - **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation, the `Replace goal?` confirmation, and `(Recommended)` question menus, using a multi-signal approach that minimizes false positives; the approval key always lands on the approval option even when the selection was moved.
 - **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5`), caches the winner for 24h, and runs agents at `xhigh` reasoning effort by default (`-e/--effort` to override).
 - **Off-screen dialog handling** — A pre-trusted Codex `PermissionRequest` hook records approval dialogs as per-pane markers, so dialogs rendered below the viewport are revealed by repaint nudges or answered blind under strict safety gates.

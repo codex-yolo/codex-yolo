@@ -17,6 +17,7 @@ Launch parallel OpenAI Codex CLI agents in tmux with auto-approval.
 
 Options:
   Default Codex permissions: Ask for approval (workspace-write, on-request, user review)
+  Command network access: enabled inside the workspace-write sandbox
   -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
   -d, --dir PATH        Working directory for agents (default: current directory)
   -m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
@@ -33,7 +34,9 @@ Options:
                         Compose multiple commands via /queue rather than repeating -c.
                         Works with --resume to inject into an existing session.
   -r, --resume          Re-attach to an existing yolo session
-  --permissions PROFILE Set Codex /permissions profile (default: auto-review / "Approve for me")
+  --permissions PROFILE Set Codex permissions mode (default: ask-for-approval)
+  --network             Enable command network access (default)
+  --no-network          Disable command network access
   --no-codex-sandbox    Disable Codex sandboxing (for externally sandboxed containers)
   --force-codex-sandbox Require Codex sandboxing; do not auto-fallback when unsupported
   -h, --help            Show this help
@@ -248,7 +251,7 @@ main() {
     local session_name="" work_dir="" model="" effort="xhigh" poll_interval="0.3" resume=0 prompt_file=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
-  local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto-review}"
+    local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
     local control_command=""
     local tasks=()
 
@@ -275,6 +278,8 @@ main() {
             --no-cleanup)      no_cleanup=1; shift ;;
             --conflict-poll)   conflict_poll="$2"; shift 2 ;;
             --permissions)          codex_permissions_policy="$2"; shift 2 ;;
+            --network)              CODEX_YOLO_NETWORK_ACCESS=1; shift ;;
+            --no-network)           CODEX_YOLO_NETWORK_ACCESS=0; shift ;;
             --no-codex-sandbox)    codex_sandbox_policy="off"; shift ;;
             --force-codex-sandbox) codex_sandbox_policy="force"; shift ;;
             -r|--resume)   resume=1; shift ;;
@@ -365,17 +370,8 @@ main() {
     # Ensure Codex CLI config directory exists
     ensure_codex_config
     configure_codex_sandbox "$codex_sandbox_policy" || exit 1
-  if [[ "$codex_permissions_policy" == "auto" || -z "$codex_permissions_policy" ]]; then
-    # Use the requirements-compatible workspace sandbox directly. Do not also
-    # inject a named permission profile: profiles that resolve to
-    # danger-full-access trigger a managed-requirements warning before Codex
-    # falls back to the administrator-required profile.
-    CODEX_YOLO_PERMISSION_PROFILE=""
-    export CODEX_YOLO_PERMISSION_PROFILE
-    log_info "Codex permissions default: WorkspaceWrite"
-  else
     configure_codex_permissions "$codex_permissions_policy" || exit 1
-  fi
+    export CODEX_YOLO_NETWORK_ACCESS
 
     # ── worktree setup ───────────────────────────────────────────────────────
     if (( worktree_mode )); then
@@ -506,6 +502,11 @@ main() {
             [[ -n "$model" ]] && merge_opts="$merge_opts --model $model"
             [[ -n "$effort" ]] && merge_opts="$merge_opts --effort $effort"
             [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] && merge_opts="$merge_opts --permissions '$CODEX_YOLO_PERMISSION_PROFILE'"
+            if [[ "$(codex_yolo_network_access_value)" == "true" ]]; then
+                merge_opts="$merge_opts --network"
+            else
+                merge_opts="$merge_opts --no-network"
+            fi
             (( CODEX_YOLO_BYPASS_CODEX_SANDBOX )) && merge_opts="$merge_opts --no-codex-sandbox"
             if [[ -n "${CODEX_YOLO_FAKE_BWRAP_DIR:-}" ]]; then
                 local fake_bwrap_dir="${CODEX_YOLO_FAKE_BWRAP_DIR//\'/\'\\\'\'}"

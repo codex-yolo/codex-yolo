@@ -5,7 +5,7 @@
 # sequentially merges each worktree branch into the base branch, and
 # spawns a Codex agent to resolve any conflicts.
 #
-# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL] [--effort LEVEL] [--permissions PROFILE] [--no-codex-sandbox] [--fake-bwrap-dir DIR]
+# Usage: merge-resolver.sh <session-name> <audit-log> [--no-cleanup] [--model MODEL] [--effort LEVEL] [--permissions PROFILE] [--network|--no-network] [--no-codex-sandbox] [--fake-bwrap-dir DIR]
 
 set -u
 
@@ -26,10 +26,11 @@ while [[ $# -gt 0 ]]; do
         --model)       MODEL="$2"; shift 2 ;;
         --effort)      EFFORT="$2"; shift 2 ;;
         --permissions)
-            CODEX_YOLO_PERMISSION_PROFILE="$2"
-            export CODEX_YOLO_PERMISSION_PROFILE
+            configure_codex_permissions "$2" || exit 1
             shift 2
             ;;
+        --network) CODEX_YOLO_NETWORK_ACCESS=1; export CODEX_YOLO_NETWORK_ACCESS; shift ;;
+        --no-network) CODEX_YOLO_NETWORK_ACCESS=0; export CODEX_YOLO_NETWORK_ACCESS; shift ;;
         --no-codex-sandbox) CODEX_YOLO_BYPASS_CODEX_SANDBOX=1; shift ;;
         --fake-bwrap-dir)
             CODEX_YOLO_FAKE_BWRAP_DIR="$2"

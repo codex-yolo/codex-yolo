@@ -26,6 +26,8 @@ log_error() {
 CODEX_YOLO_BYPASS_CODEX_SANDBOX="${CODEX_YOLO_BYPASS_CODEX_SANDBOX:-0}"
 CODEX_YOLO_FORCE_CODEX_SANDBOX="${CODEX_YOLO_FORCE_CODEX_SANDBOX:-0}"
 CODEX_YOLO_ASK_FOR_APPROVAL="${CODEX_YOLO_ASK_FOR_APPROVAL:-0}"
+CODEX_YOLO_APPROVALS_REVIEWER="${CODEX_YOLO_APPROVALS_REVIEWER:-user}"
+CODEX_YOLO_NETWORK_ACCESS="${CODEX_YOLO_NETWORK_ACCESS:-1}"
 CODEX_YOLO_SANDBOX_PROBE_RESULT="${CODEX_YOLO_SANDBOX_PROBE_RESULT:-}"
 CODEX_YOLO_SANDBOX_PROBE_MESSAGE="${CODEX_YOLO_SANDBOX_PROBE_MESSAGE:-}"
 CODEX_YOLO_CONTAINER_DETECTED="${CODEX_YOLO_CONTAINER_DETECTED:-}"
@@ -356,6 +358,7 @@ configure_codex_permissions() {
     local policy="${1:-auto}"
 
     CODEX_YOLO_ASK_FOR_APPROVAL=0
+    CODEX_YOLO_APPROVALS_REVIEWER="user"
 
     case "$policy" in
         auto|"")
@@ -367,11 +370,15 @@ configure_codex_permissions() {
             CODEX_YOLO_PERMISSION_PROFILE=""
             CODEX_YOLO_ASK_FOR_APPROVAL=1
             ;;
-        full-access|codex-auto-review)
+        full-access)
             CODEX_YOLO_PERMISSION_PROFILE="$policy"
             ;;
-        auto-review)
+        auto-review|codex-auto-review)
+            # Auto-review changes who reviews approval requests; it does not
+            # require a named filesystem/network permission profile.
             CODEX_YOLO_PERMISSION_PROFILE="codex-auto-review"
+            CODEX_YOLO_ASK_FOR_APPROVAL=1
+            CODEX_YOLO_APPROVALS_REVIEWER="auto_review"
             ;;
         none|default|off)
             CODEX_YOLO_PERMISSION_PROFILE=""
@@ -384,6 +391,7 @@ configure_codex_permissions() {
 
     export CODEX_YOLO_PERMISSION_PROFILE
     export CODEX_YOLO_ASK_FOR_APPROVAL
+    export CODEX_YOLO_APPROVALS_REVIEWER
 }
 
 codex_yolo_permission_config_arg() {
@@ -393,14 +401,28 @@ codex_yolo_permission_config_arg() {
     fi
 
     if (( ${CODEX_YOLO_ASK_FOR_APPROVAL:-0} )); then
-        printf -- "--sandbox workspace-write --ask-for-approval on-request -c 'approvals_reviewer=\"user\"' "
+        local reviewer="${CODEX_YOLO_APPROVALS_REVIEWER:-user}"
+        reviewer="${reviewer//\"/\\\"}"
+        printf -- "--sandbox workspace-write --ask-for-approval on-request -c 'approvals_reviewer=\"%s\"' -c 'sandbox_workspace_write.network_access=%s' " \
+            "$reviewer" "$(codex_yolo_network_access_value)"
         return 0
     fi
 
-    [[ -n "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]] || return 0
+    if [[ -z "${CODEX_YOLO_PERMISSION_PROFILE:-}" ]]; then
+        printf -- "--sandbox workspace-write -c 'sandbox_workspace_write.network_access=%s' " \
+            "$(codex_yolo_network_access_value)"
+        return 0
+    fi
 
     local profile="${CODEX_YOLO_PERMISSION_PROFILE//\"/\\\"}"
     printf -- "-c 'permission_profile=\"%s\"' " "$profile"
+}
+
+codex_yolo_network_access_value() {
+    case "${CODEX_YOLO_NETWORK_ACCESS:-1}" in
+        0|false|no|off) printf 'false\n' ;;
+        *)              printf 'true\n' ;;
+    esac
 }
 
 codex_linux_sandbox_works() {
@@ -615,7 +637,7 @@ codex_yolo_configure_runtime_defaults() {
             return s
         }
         function print_missing_root() {
-            if (!have_approval) print "approval_policy = \"on-failure\""
+            if (!have_approval) print "approval_policy = \"on-request\""
             if (!have_sandbox) print "sandbox_mode = \"workspace-write\""
         }
         function print_missing_features() {
@@ -648,7 +670,7 @@ codex_yolo_configure_runtime_defaults() {
             }
 
             if (!left_root && line ~ /^approval_policy[[:space:]]*=/) {
-                if (!have_approval) print "approval_policy = \"on-failure\""
+                if (!have_approval) print "approval_policy = \"on-request\""
                 have_approval = 1
                 next
             }
