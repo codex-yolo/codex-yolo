@@ -1867,6 +1867,12 @@ assert_eq "build_agent_cmd: waiting dir single-quote escaping" \
 
 section "build_exec_agent_cmd — Worktree command construction"
 
+CODEX_YOLO_ASK_FOR_APPROVAL=1
+_out="$(build_exec_agent_cmd "" "fix the bug")"
+assert_eq "build_exec_agent_cmd: approval flags precede exec subcommand" \
+    "codex --sandbox workspace-write --ask-for-approval on-request -c 'approvals_reviewer=\"user\"' -c 'sandbox_workspace_write.network_access=true' exec 'fix the bug'" "$_out"
+CODEX_YOLO_ASK_FOR_APPROVAL=0
+
 _out="$(build_exec_agent_cmd "" "fix the bug")"
 assert_eq "build_exec_agent_cmd: no model" \
     "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' 'fix the bug'" "$_out"

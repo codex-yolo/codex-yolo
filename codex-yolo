@@ -628,7 +628,9 @@ build_exec_agent_cmd() {
     local effort_arg
   local permission_arg
   permission_arg="$(codex_yolo_permission_config_arg)"
-  if [[ -n "$permission_arg" ]]; then
+  if (( ${CODEX_YOLO_ASK_FOR_APPROVAL:-0} )) && [[ -n "$permission_arg" ]]; then
+    cmd="$(codex_yolo_command_prefix)codex ${permission_arg%" "} exec"
+  elif [[ -n "$permission_arg" ]]; then
     cmd="$(codex_yolo_command_prefix)codex exec $permission_arg"
   else
     cmd="$(codex_yolo_command_prefix)codex exec --sandbox workspace-write"
