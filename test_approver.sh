@@ -4653,10 +4653,10 @@ _test_config_creates_runtime_defaults() {
            /^\[features\]$/ { in_features = 1; next }
            /^\[/ { in_features = 0 }
            in_features && /^shell_tool = true$/ { shell_tool = 1 }
-           in_features && /^unified_exec = true$/ { unified_exec = 1 }
            in_features && /^code_mode_host = true$/ { code_mode_host = 1 }
-           END { exit shell_tool && unified_exec && code_mode_host ? 0 : 1 }
-       ' "$config_file"; then
+           END { exit shell_tool && code_mode_host ? 0 : 1 }
+       ' "$config_file" && \
+       ! grep -q '^unified_exec[[:space:]]*=' "$config_file"; then
         result=0
     fi
     rm -rf "$fake_home"
@@ -4689,10 +4689,32 @@ EOF
        [[ "$(grep -c '^sandbox_mode = "workspace-write"$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^\[features\]$' "$config_file")" == "1" ]] && \
        [[ "$(grep -c '^shell_tool = true$' "$config_file")" == "1" ]] && \
-       [[ "$(grep -c '^unified_exec = true$' "$config_file")" == "1" ]] && \
+       [[ "$(grep -c '^unified_exec = false$' "$config_file")" == "1" ]] && \
+       ! grep -q '^unified_exec = true$' "$config_file" && \
        [[ "$(grep -c '^code_mode_host = true$' "$config_file")" == "1" ]] && \
        grep -q '^apps = true$' "$config_file" && \
        grep -q '^model = "gpt-5.5"$' "$config_file"; then
+        result=0
+    fi
+    rm -rf "$fake_home"
+    return $result
+}
+
+_test_config_removes_legacy_unified_exec_override() {
+    local fake_home
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.codex"
+    cat > "$fake_home/.codex/config.toml" <<'EOF'
+[features]
+unified_exec = true # written by an older codex-yolo release
+EOF
+
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 CODEX_YOLO_NO_PERMISSION_HOOK=1 ensure_codex_config 2>/dev/null
+
+    local config_file="$fake_home/.codex/config.toml" result=1
+    if ! grep -q '^unified_exec[[:space:]]*=' "$config_file" && \
+       grep -q '^shell_tool = true$' "$config_file" && \
+       grep -q '^code_mode_host = true$' "$config_file"; then
         result=0
     fi
     rm -rf "$fake_home"
@@ -4788,7 +4810,7 @@ sandbox_mode = "workspace-write"
 
 [features]
 shell_tool = true
-unified_exec = true
+unified_exec = false
 code_mode_host = true
 
 [tui]
@@ -4808,6 +4830,7 @@ assert_ok "ensure_codex_config: creates .codex directory" _test_config_creates_d
 assert_ok "ensure_codex_config: creates config.toml" _test_config_creates_toml
 assert_ok "ensure_codex_config: creates runtime defaults" _test_config_creates_runtime_defaults
 assert_ok "ensure_codex_config: reconciles runtime defaults" _test_config_reconciles_runtime_defaults
+assert_ok "ensure_codex_config: removes legacy unified_exec override" _test_config_removes_legacy_unified_exec_override
 assert_ok "ensure_codex_config: creates TUI status line" _test_config_creates_tui_status_line
 assert_ok "ensure_codex_config: idempotent after configuring TUI" _test_config_idempotent
 assert_ok "ensure_codex_config: appends TUI status line to existing config" _test_config_appends_tui_status_line_to_existing_config

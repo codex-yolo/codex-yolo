@@ -18,9 +18,11 @@ sandbox_mode = "workspace-write"
 
 [features]
 shell_tool = true
-unified_exec = true
 code_mode_host = true
 ```
+
+`unified_exec` is intentionally left unset so the Codex default or an
+organization's managed requirement can select the execution backend.
 
 ## Table of contents
 

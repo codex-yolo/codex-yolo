@@ -642,7 +642,6 @@ codex_yolo_configure_runtime_defaults() {
         }
         function print_missing_features() {
             if (!have_shell_tool) print "shell_tool = true"
-            if (!have_unified_exec) print "unified_exec = true"
             if (!have_code_mode_host) print "code_mode_host = true"
         }
         {
@@ -685,7 +684,11 @@ codex_yolo_configure_runtime_defaults() {
                 next
             }
             if (in_features && line ~ /^unified_exec[[:space:]]*=/) {
-                if (!have_unified_exec) print "unified_exec = true"
+                # Older codex-yolo versions forced unified_exec on. It is on by
+                # default on supported systems, while managed workspaces may
+                # require it off. Drop the old true override so Codex can apply
+                # its default or managed requirement; preserve an explicit false.
+                if (!have_unified_exec && line !~ /^unified_exec[[:space:]]*=[[:space:]]*true$/) print raw
                 have_unified_exec = 1
                 next
             }
@@ -704,7 +707,6 @@ codex_yolo_configure_runtime_defaults() {
                 print ""
                 print "[features]"
                 print "shell_tool = true"
-                print "unified_exec = true"
                 print "code_mode_host = true"
             }
         }
