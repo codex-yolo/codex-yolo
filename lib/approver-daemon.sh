@@ -220,7 +220,12 @@ detect_plan_prompt() {
 
     local has_plan=0 has_approval_option=0 has_context=0
 
-    if echo "$tail_content" | grep -qiE '(proposed plan|proceed with (this )?plan|implement (this )?plan|approve (this )?plan|plan mode|^ *plan:)'; then
+    # Require an actual plan-decision question. Loose mentions such as the
+    # status line "Model changed ... for Plan mode" can remain visible above
+    # an unrelated command-approval dialog; treating those words as the plan
+    # signal causes the generic dialog to be withheld for lack of a /plan
+    # control marker.
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*(│[[:space:]]*)?(Would you like to[[:space:]]+)?(proceed with (this )?plan|implement (this )?plan|approve (this )?plan)[?[:space:]]*$'; then
         has_plan=1
     fi
 

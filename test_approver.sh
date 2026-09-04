@@ -1322,6 +1322,28 @@ assert_fail "Plan approval: normal planning text is not a prompt" \
 PANE
 )"
 
+_command_prompt_after_plan_mode_status="$(cat <<'PANE'
+  • Model changed for Plan mode.
+
+  • I’ll inspect the relevant files first.
+
+  Would you like to run the following command?
+
+  $ rg --files docs
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+PANE
+)"
+
+assert_fail "Plan approval: prior Plan mode status does not claim a command prompt" \
+    detect_plan_prompt "$_command_prompt_after_plan_mode_status"
+
+assert_ok "Plan approval: command prompt after Plan mode status stays generic" \
+    detect_prompt "$_command_prompt_after_plan_mode_status"
+
 assert_fail "Plan approval: generic detector does not approve plan prompt" \
     detect_prompt "$(make_plan_prompt)"
 
