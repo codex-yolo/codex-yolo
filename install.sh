@@ -20,9 +20,6 @@ BIN_DIR="$REQUESTED_BIN_DIR"
 NPM_PREFIX="${CODEX_YOLO_NPM_PREFIX:-$HOME/.local}"
 NPM_BIN_DIR="$NPM_PREFIX/bin"
 ORIGINAL_PATH="${PATH:-}"
-DEFAULT_CODEX_VERSION="0.149.1"
-DEFAULT_CODEX_TAG="rust-v${DEFAULT_CODEX_VERSION}"
-
 # Make user-prefix npm installs visible during this script, not just after it.
 export PATH="$BIN_DIR:$NPM_BIN_DIR:$ORIGINAL_PATH"
 
@@ -242,18 +239,30 @@ codex_tag_to_version() {
     printf '%s\n' "$tag"
 }
 
-# Keep Codex on the known-compatible release unless the caller explicitly
-# selects another release tag.
+# Use the latest stable Codex release by default. Callers can still pin an
+# exact release tag with CODEX_YOLO_CODEX_VERSION.
 codex_target_tag() {
-    printf '%s\n' "${CODEX_YOLO_CODEX_VERSION:-$DEFAULT_CODEX_TAG}"
+    if [[ -n "${CODEX_YOLO_CODEX_VERSION:-}" ]]; then
+        printf '%s\n' "$CODEX_YOLO_CODEX_VERSION"
+        return 0
+    fi
+
+    codex_latest_stable_tag 2>/dev/null || true
 }
 
 codex_target_version() {
-    codex_tag_to_version "$(codex_target_tag)"
+    local tag
+    tag="$(codex_target_tag)"
+    [[ -n "$tag" ]] || return 0
+    codex_tag_to_version "$tag"
 }
 
 codex_target_npm_package() {
-    printf '%s\n' "@openai/codex@$(codex_target_version)"
+    if [[ -n "${CODEX_YOLO_CODEX_VERSION:-}" ]]; then
+        printf '%s\n' "@openai/codex@$(codex_tag_to_version "$CODEX_YOLO_CODEX_VERSION")"
+    else
+        printf '%s\n' '@openai/codex@latest'
+    fi
 }
 
 # True iff `codex` on PATH resolves to a file we placed in $BIN_DIR.
@@ -281,7 +290,7 @@ codex_latest_stable_tag() {
     headers="$(curl -fsSI --retry 2 "https://github.com/openai/codex/releases/latest" 2>/dev/null)" || return 1
 
     location="$(printf '%s\n' "$headers" \
-        | awk 'BEGIN { IGNORECASE=1 } /^location:/ { print $2 }' \
+        | awk 'tolower($1) == "location:" { print $2 }' \
         | tr -d '\r' \
         | tail -1)"
     [[ -n "$location" ]] || return 1
@@ -293,7 +302,7 @@ codex_latest_stable_tag() {
 }
 
 install_codex_release_binary() {
-    local asset tag archive_url tmp_dir archive extracted
+    local asset tag archive_url tmp_dir archive extracted transaction_dir staged previous_codex had_previous=0
 
     [[ "$IS_TERMUX" -eq 0 ]] || return 1
     command -v curl &>/dev/null || return 1
@@ -301,9 +310,20 @@ install_codex_release_binary() {
 
     asset="$(codex_release_asset_name "$OS" "$(uname -m)")" || return 1
 
-    tag="$(codex_target_tag)"
-    info "Using pinned Codex CLI release: $tag"
-    archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
+    tag="$(codex_target_tag 2>/dev/null || true)"
+    if [[ -n "${CODEX_YOLO_CODEX_VERSION:-}" ]]; then
+        info "Using pinned Codex CLI release: $tag"
+    elif [[ -n "$tag" ]]; then
+        info "Latest stable Codex CLI release: $tag"
+    else
+        warn "Could not resolve latest stable Codex CLI tag — falling back to /releases/latest redirect"
+    fi
+
+    if [[ -n "$tag" ]]; then
+        archive_url="https://github.com/openai/codex/releases/download/${tag}/${asset}.tar.gz"
+    else
+        archive_url="https://github.com/openai/codex/releases/latest/download/${asset}.tar.gz"
+    fi
     tmp_dir="$(mktemp -d)" || return 1
     archive="$tmp_dir/codex.tar.gz"
     extracted="$tmp_dir/$asset"
@@ -323,27 +343,59 @@ install_codex_release_binary() {
         return 1
     fi
 
-    if ! cp "$extracted" "$BIN_DIR/codex" || ! chmod +x "$BIN_DIR/codex"; then
-        rm -f "$BIN_DIR/codex"
+    # Stage the replacement and backup on BIN_DIR's filesystem so the final
+    # install and any rollback can use atomic renames.
+    transaction_dir="$(mktemp -d "$BIN_DIR/.codex-install.XXXXXX")" || {
         rm -rf "$tmp_dir"
+        return 1
+    }
+    staged="$transaction_dir/codex.new"
+    previous_codex="$transaction_dir/codex.previous"
+
+    if ! cp "$extracted" "$staged" || ! chmod +x "$staged"; then
+        rm -rf "$tmp_dir" "$transaction_dir"
         return 1
     fi
 
-    rm -rf "$tmp_dir"
+    # Keep an installer-managed working binary recoverable until both the new
+    # CLI and its version-matched Code Mode host have been verified.
+    if [[ -f "$BIN_DIR/codex" ]] && command_runnable "$BIN_DIR/codex" --version; then
+        if ! cp "$BIN_DIR/codex" "$previous_codex"; then
+            rm -rf "$tmp_dir" "$transaction_dir"
+            return 1
+        fi
+        had_previous=1
+    fi
+
+    if ! mv -f "$staged" "$BIN_DIR/codex"; then
+        rm -rf "$tmp_dir" "$transaction_dir"
+        return 1
+    fi
+
     hash -r 2>/dev/null || true
 
     if codex_cli_works; then
         if install_codex_release_code_mode_host "$(codex_tag_to_version "$tag")"; then
+            rm -rf "$tmp_dir" "$transaction_dir"
             return 0
         fi
 
         warn "Codex CLI installed, but its matching Code Mode host could not be installed"
-        rm -f "$BIN_DIR/codex"
-        hash -r 2>/dev/null || true
-        return 1
     fi
 
-    rm -f "$BIN_DIR/codex"
+    if (( had_previous )); then
+        if ! mv -f "$previous_codex" "$BIN_DIR/codex"; then
+            warn "Failed to restore the previous Codex CLI; backup retained at $previous_codex"
+            rm -rf "$tmp_dir"
+            hash -r 2>/dev/null || true
+            return 1
+        fi
+    else
+        if ! rm -f "$BIN_DIR/codex"; then
+            warn "Failed to remove the unusable Codex CLI at $BIN_DIR/codex"
+        fi
+    fi
+    rm -rf "$tmp_dir" "$transaction_dir"
     hash -r 2>/dev/null || true
     return 1
 }
@@ -636,7 +688,7 @@ if codex_cli_needs_install; then
 elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
     # Codex is installed and works — check for an upgrade.
     INSTALLED_VERSION="$(codex_installed_version 2>/dev/null || true)"
-    TARGET_VERSION="$(codex_target_version)"
+    TARGET_VERSION="$(codex_target_version 2>/dev/null || true)"
 
     if [[ -n "$INSTALLED_VERSION" && -n "$TARGET_VERSION" && "$INSTALLED_VERSION" != "$TARGET_VERSION" ]]; then
         if codex_install_is_ours; then
@@ -644,7 +696,12 @@ elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
             if install_codex_release_binary; then
                 info "Codex CLI set to $TARGET_VERSION"
             else
-                warn "Codex CLI version change failed; keeping installed version $INSTALLED_VERSION"
+                ACTIVE_VERSION="$(codex_installed_version 2>/dev/null || true)"
+                if codex_cli_works; then
+                    warn "Codex CLI version change failed; active version is ${ACTIVE_VERSION:-unknown}"
+                else
+                    warn "Codex CLI version change failed; no runnable Codex CLI is active"
+                fi
             fi
         else
             info "Codex CLI target is $TARGET_VERSION (installed: $INSTALLED_VERSION), but '$(command -v codex)' is not managed by this installer — leaving it unchanged. Set CODEX_YOLO_SKIP_CODEX_UPGRADE=1 to silence."
@@ -653,8 +710,8 @@ elif [[ "${CODEX_YOLO_SKIP_CODEX_UPGRADE:-0}" != "1" ]]; then
 fi
 
 # Older codex-yolo standalone installs copied only the main executable. Repair
-# those installations on the next installer run even when the pinned Codex
-# version itself has not changed.
+# those installations on the next installer run even when the Codex version
+# itself has not changed.
 if codex_install_is_ours && ! command_runnable "$BIN_DIR/codex-code-mode-host" --help; then
     INSTALLED_VERSION="$(codex_installed_version 2>/dev/null || true)"
     info "Installing Codex Code Mode host ${INSTALLED_VERSION:+$INSTALLED_VERSION}"

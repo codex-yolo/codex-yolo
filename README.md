@@ -57,7 +57,7 @@ including the Ubuntu 24.04 AppArmor profile setup when applicable.
 command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | bash && export PATH="${CODEX_YOLO_BIN_DIR:-$HOME/.local/bin}:${CODEX_YOLO_HOME:-$HOME/.codex-yolo}/bin:$PATH"
 ```
 
-This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. If `~/.local/bin` is not writable, the installer falls back to `~/.codex-yolo/bin`; you can also set `CODEX_YOLO_BIN_DIR` to choose a writable bin directory. It also installs `git`, `tmux`, `curl`, and `codex` if they are missing. Codex CLI and its version-matched `codex-code-mode-host` companion are installed from the standalone GitHub release first, with npm as a fallback. For compatibility, both paths are currently pinned to Codex CLI `0.149.1`. Re-running the one-liner repairs older installer-managed Codex installs that are missing the Code Mode host. It also sets installer-managed Codex binaries to the pinned version; npm-, brew-, and system-managed Codex installs are left unchanged. Set `CODEX_YOLO_SKIP_CODEX_UPGRADE=1` to leave an installer-managed binary unchanged, or set `CODEX_YOLO_CODEX_VERSION=rust-v0.X.Y` to select another release. Override the install location with `CODEX_YOLO_HOME`:
+This clones to `~/.codex-yolo` and symlinks the binary into `~/.local/bin`. If `~/.local/bin` is not writable, the installer falls back to `~/.codex-yolo/bin`; you can also set `CODEX_YOLO_BIN_DIR` to choose a writable bin directory. It also installs `git`, `tmux`, `curl`, and `codex` if they are missing. Codex CLI and its version-matched `codex-code-mode-host` companion are installed from the latest stable standalone GitHub release first, with `@openai/codex@latest` from npm as a fallback. Re-running the one-liner upgrades installer-managed Codex binaries to the latest stable release and repairs older installs that are missing the Code Mode host; npm-, brew-, and system-managed Codex installs are left unchanged. Set `CODEX_YOLO_SKIP_CODEX_UPGRADE=1` to leave an installer-managed binary unchanged, or set `CODEX_YOLO_CODEX_VERSION=rust-v0.X.Y` to pin a specific release. Override the install location with `CODEX_YOLO_HOME`:
 
 ```bash
 CODEX_YOLO_HOME="$HOME/my/path"; command -v curl >/dev/null || { s=; [ "$(id -u)" != 0 ] && s=sudo; command -v apt-get >/dev/null && { $s apt-get update && $s apt-get install -y curl; } || command -v dnf >/dev/null && $s dnf install -y curl || command -v yum >/dev/null && $s yum install -y curl || command -v apk >/dev/null && $s apk add curl || command -v pacman >/dev/null && $s pacman -S --noconfirm curl || command -v pkg >/dev/null && pkg install -y curl || command -v brew >/dev/null && brew install curl; }; curl -fsSL https://raw.githubusercontent.com/codex-yolo/codex-yolo/refs/heads/main/install.sh | CODEX_YOLO_HOME="$CODEX_YOLO_HOME" bash && export PATH="${CODEX_YOLO_BIN_DIR:-$HOME/.local/bin}:$CODEX_YOLO_HOME/bin:$PATH"
@@ -94,9 +94,9 @@ The tool runs agents in whatever directory you invoke it from (or the `-d`/`--di
 codex-yolo "fix the login bug" "add unit tests for auth" "update the README"
 
 # Use a specific model
-codex-yolo -m gpt-5.5 "refactor the API layer"
+codex-yolo -m gpt-5.6-sol "refactor the API layer"
 
-# Dial the reasoning effort down (default: xhigh)
+# Dial the reasoning effort down (default: ultra)
 codex-yolo -e medium "quick cleanup pass"
 
 # Point agents at a different project
@@ -107,7 +107,7 @@ Once launched, you're inside a tmux session with one window per agent. The last 
 
 ### Model selection
 
-Without `-m/--model`, codex-yolo picks the most capable model your account can actually use: it probes `gpt-5.6-sol`, then `gpt-5.6-terra`, then `gpt-5.5` with a tiny one-shot `codex exec` request and launches every agent (and the worktree merge resolver) with the first one that answers. The winner is cached in `~/.codex-yolo/model-cache` for 24 hours, so only the first launch of the day pays the probe; changing `CODEX_YOLO_MODEL_CANDIDATES` invalidates the cache immediately if the cached model is no longer a candidate. If no candidate responds (offline, not logged in), agents launch without `--model` and Codex uses its own configured default. Probing beats reading the local model catalog — the catalog lists what exists, not what your account/plan (or your installed CLI version) is currently allowed to use. Agents also run at `model_reasoning_effort = "xhigh"` by default — override with `-e/--effort`, or `-e none` to leave whatever your `~/.codex/config.toml` sets. The probe itself always runs at low effort, so an exotic configured effort level can never fail a model that would otherwise work. Tune with `CODEX_YOLO_MODEL_CACHE_TTL` (seconds, default 86400) and `CODEX_YOLO_MODEL_PROBE_TIMEOUT` (seconds per probe, default 60).
+Without `-m/--model`, codex-yolo picks the most capable model your account can actually use: it probes `gpt-6-astra`, then `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and finally `gpt-5.5` with a tiny one-shot `codex exec` request. It launches every agent (and the worktree merge resolver) with the first model that answers. The winner and candidate order are cached in `~/.codex-yolo/model-cache` for 24 hours, so only the first launch of the day pays the probe; changing `CODEX_YOLO_MODEL_CANDIDATES`, including its order, invalidates the cache immediately. If no candidate responds (offline, not logged in), agents launch with Codex's configured model and effort. Probing beats reading the local model catalog — the catalog lists what exists, not what your account/plan (or your installed CLI version) is currently allowed to use. Agents run at `model_reasoning_effort = "ultra"` by default — override with `-e/--effort`, or `-e none` to leave whatever your `~/.codex/config.toml` sets. Luna supports through `max` and GPT-5.5 through `xhigh`, so codex-yolo uses those levels automatically when either is selected with the default effort; an explicit incompatible effort fails with guidance instead of being silently changed. Ultra also requires an eligible account. Because the quick probe deliberately runs at low effort and tests model access only, use `-e max` (or another supported level) if Codex reports that Ultra is unavailable for your account. Tune with `CODEX_YOLO_MODEL_CACHE_TTL` (seconds, default 86400) and `CODEX_YOLO_MODEL_PROBE_TIMEOUT` (seconds per probe, default 60).
 
 ## Worktree mode
 
@@ -226,12 +226,13 @@ The default permissions mode is **Ask for approval** (`workspace-write`, `on-req
 ```
 -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
 -d, --dir PATH        Working directory for agents (default: current directory)
--m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
+-m, --model MODEL     Model to use (e.g., gpt-6-astra, gpt-5.6-sol).
                       Default: best available model, probed automatically
-                      (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
+                      (Astra → Sol → Terra → Luna → GPT-5.5), cached for 24h
 -e, --effort LEVEL    Reasoning effort for each agent
-                          (minimal|low|medium|high|xhigh|max, or 'none' to
-                      leave Codex's configured default). Default: xhigh
+                      (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                      leave Codex's configured default). Default: ultra;
+                      compatibility fallbacks: Luna max, GPT-5.5 xhigh
 -p, --poll SECONDS    Approver poll interval (default: 0.3)
 -f, --file FILE       Read a multiline prompt from a text file
 -c, --command STRING  Slash command to run in the control pane after launch
@@ -400,7 +401,7 @@ docs/
   * `bubblewrap` on Linux and WSL2 (installed automatically when missing; see the [official Codex sandbox prerequisites](https://learn.chatgpt.com/docs/sandboxing?surface=app#app-prerequisites))
 
 - **tmux** (tested with 3.4)
-- **codex** (OpenAI Codex CLI `0.149.1` by default — installed from the standalone GitHub release or `npm install -g @openai/codex@0.149.1`)
+- **codex** (OpenAI Codex CLI — the installer uses the latest stable standalone GitHub release or `npm install -g @openai/codex@latest`)
 - **git** 2.38+ (required for worktree mode — `git merge-tree --write-tree`)
 
 ## Testing
@@ -441,7 +442,7 @@ The test suite covers:
 - **Automated conflict resolution** — On merge conflict, a Codex resolver task is spawned to resolve conflict markers and commit the merge.
 - **Requirements-compatible defaults** — Standard sessions omit `--yolo`, request `workspace-write` with `on-request` approvals, and explicitly enable sandboxed command networking. Explicit Full Access remains available for isolated environments where broad command execution is acceptable.
 - **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation, the `Replace goal?` confirmation, and `(Recommended)` question menus, using a multi-signal approach that minimizes false positives; the approval key always lands on the approval option even when the selection was moved.
-- **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5`), caches the winner for 24h, and runs agents at `xhigh` reasoning effort by default (`-e/--effort` to override).
+- **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-6-astra` → `gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.6-luna` → `gpt-5.5`), caches the winner for 24h, and runs Ultra-capable models at `ultra` reasoning effort by default (`-e/--effort` to override; Luna falls back to `max` and GPT-5.5 to `xhigh`).
 - **Off-screen dialog handling** — A pre-trusted Codex `PermissionRequest` hook records approval dialogs as per-pane markers, so dialogs rendered below the viewport are revealed by repaint nudges or answered blind under strict safety gates.
 - **Turn-complete bell** — Configures (and pre-trusts) a Codex `Stop` hook so the terminal bell rings when an agent finishes its turn; opt out with `CODEX_YOLO_NO_BELL=1`.
 - **Reliability and traceability** — Per-pane cooldowns, a static-pane send cap, a duplicate-daemon lock, detailed audit logging, and an extensive test suite emphasize reliability and traceability.

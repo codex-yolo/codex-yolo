@@ -115,7 +115,7 @@ section() { echo "${_yellow}▸ $1${_reset}"; }
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Source install-time helpers without running the installer.
-eval "$(sed -n '/^DEFAULT_CODEX_/p; /^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^codex_code_mode_host_asset_name()/,/^}/p; /^codex_tag_to_version()/,/^}/p; /^codex_target_tag()/,/^}/p; /^codex_target_version()/,/^}/p; /^codex_target_npm_package()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
+eval "$(sed -n '/^command_runnable()/,/^}/p; /^node_runtime_works()/,/^}/p; /^npm_runtime_works()/,/^}/p; /^codex_cli_works()/,/^}/p; /^codex_cli_needs_install()/,/^}/p; /^codex_cli_failure_summary()/,/^}/p; /^codex_release_asset_name()/,/^}/p; /^codex_code_mode_host_asset_name()/,/^}/p; /^codex_tag_to_version()/,/^}/p; /^codex_target_tag()/,/^}/p; /^codex_target_version()/,/^}/p; /^codex_target_npm_package()/,/^}/p; /^codex_latest_stable_tag()/,/^}/p; /^install_codex_release_binary()/,/^}/p; /^git_install_dir()/,/^}/p' "$SCRIPT_DIR/install.sh")"
 
 # Source detect_prompt, detect_elicitation and friends without running the daemon's main_loop.
 eval "$(sed -n '/^declare -A /p; /^SEND_STREAK_CAP=/p; /^COOLDOWN_SECS=/p; /^PLAN_APPROVAL_TTL=/p; /^SLASH_APPROVAL_TTL=/p; /^NOTIFY_MARKER_TTL=/p; /^HIDDEN_NUDGE_MAX=/p; /^HIDDEN_BLIND_WINDOW=/p; /^[a-z][a-z_0-9]*()/,/^}/p' "$SCRIPT_DIR/lib/approver-daemon.sh")"
@@ -1860,10 +1860,14 @@ assert_eq "build_agent_cmd: forced Codex sandbox uses workspace-write" \
 CODEX_YOLO_BYPASS_CODEX_SANDBOX=0
 CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 
+assert_contains "launcher: defaults reasoning effort to ultra" \
+    "$(sed -n '/local session_name=.*effort=/p' "$SCRIPT_DIR/codex-yolo")" \
+    'effort="ultra"'
+
 # Reasoning effort rides along as a -c override, after the model
-_out="$(build_agent_cmd "gpt-5.6-sol" "fix the bug" "xhigh")"
+_out="$(build_agent_cmd "gpt-6-astra" "fix the bug" "ultra")"
 assert_eq "build_agent_cmd: effort after model" \
-    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+    "codex --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-6-astra -c 'model_reasoning_effort=\"ultra\"' 'fix the bug'" "$_out"
 
 _out="$(build_agent_cmd "" "task" "max")"
 assert_eq "build_agent_cmd: effort without model" \
@@ -1934,6 +1938,10 @@ CODEX_YOLO_FORCE_CODEX_SANDBOX=0
 _out="$(build_exec_agent_cmd "gpt-5.5" "fix the bug" "xhigh")"
 assert_eq "build_exec_agent_cmd: effort after model" \
     "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' 'fix the bug'" "$_out"
+
+_out="$(build_exec_agent_cmd "gpt-6-astra" "fix the bug" "ultra")"
+assert_eq "build_exec_agent_cmd: ultra effort for worktree resolver" \
+    "codex exec --sandbox workspace-write -c 'sandbox_workspace_write.network_access=true' --model gpt-6-astra -c 'model_reasoning_effort=\"ultra\"' 'fix the bug'" "$_out"
 
 _out="$(build_exec_agent_cmd "" "task" "")"
 assert_eq "build_exec_agent_cmd: empty effort omits the override" \
@@ -5117,13 +5125,17 @@ rm -rf "$_hook_tmp"
 
 section "resolve_best_model — best-model auto-selection"
 
+assert_contains "resolve_best_model: default candidates start with Astra" \
+    "$(sed -n '/^CODEX_YOLO_MODEL_CANDIDATES=/p' "$SCRIPT_DIR/lib/common.sh")" \
+    'gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5'
+
 _rbm_tmp="$(mktemp -d)"
 # Pin the knobs this section asserts against (a user-exported
 # CODEX_YOLO_MODEL_CANDIDATES would otherwise change candidate order and
 # fail correct code); restored after the section.
 _rbm_prev_candidates="$CODEX_YOLO_MODEL_CANDIDATES"
 _rbm_prev_ttl="$CODEX_YOLO_MODEL_CACHE_TTL"
-CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+CODEX_YOLO_MODEL_CANDIDATES="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
 CODEX_YOLO_MODEL_CACHE_TTL=86400
 model_cache_file() { echo "$_rbm_tmp/model-cache"; }
 
@@ -5132,22 +5144,34 @@ codex_yolo_probe_model() {
     [[ " $_RBM_AVAILABLE " == *" $1 "* ]]
 }
 
-_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+_RBM_AVAILABLE="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
 _out="$(resolve_best_model 2>/dev/null)"
-assert_eq "resolve_best_model: picks gpt-5.6-sol when available" "gpt-5.6-sol" "$_out"
+assert_eq "resolve_best_model: picks gpt-6-astra when available" "gpt-6-astra" "$_out"
 
 assert_eq "resolve_best_model: caches the winner" \
-    "gpt-5.6-sol" "$(head -1 "$_rbm_tmp/model-cache")"
+    "gpt-6-astra" "$(head -1 "$_rbm_tmp/model-cache")"
+assert_eq "resolve_best_model: caches candidate order" \
+    "$CODEX_YOLO_MODEL_CANDIDATES" "$(sed -n '2p' "$_rbm_tmp/model-cache")"
 
-_RBM_AVAILABLE="gpt-5.5"
+_RBM_AVAILABLE="gpt-5.6-terra"
 _out="$(resolve_best_model 2>/dev/null)"
 assert_eq "resolve_best_model: fresh cache short-circuits probing" \
-    "gpt-5.6-sol" "$_out"
+    "gpt-6-astra" "$_out"
 
 rm -f "$_rbm_tmp/model-cache"
-_RBM_AVAILABLE="gpt-5.6-terra gpt-5.5"
+_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra"
 _out="$(resolve_best_model 2>/dev/null)"
-assert_eq "resolve_best_model: falls back to terra when sol unavailable" "gpt-5.6-terra" "$_out"
+assert_eq "resolve_best_model: falls back to sol when Astra unavailable" "gpt-5.6-sol" "$_out"
+
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.6-terra"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: falls back to terra" "gpt-5.6-terra" "$_out"
+
+rm -f "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.6-luna gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: falls back to luna" "gpt-5.6-luna" "$_out"
 
 rm -f "$_rbm_tmp/model-cache"
 _RBM_AVAILABLE="gpt-5.5"
@@ -5164,23 +5188,48 @@ assert_ok "resolve_best_model: returns 0 even when no candidate works" \
 
 # An expired cache is re-probed
 rm -f "$_rbm_tmp/model-cache"
-_RBM_AVAILABLE="gpt-5.5"
-resolve_best_model >/dev/null 2>&1   # caches gpt-5.5
+_RBM_AVAILABLE="gpt-5.6-terra"
+resolve_best_model >/dev/null 2>&1   # caches gpt-5.6-terra
 CODEX_YOLO_MODEL_CACHE_TTL=0
-_RBM_AVAILABLE="gpt-5.6-sol"
+_RBM_AVAILABLE="gpt-6-astra"
 _out="$(resolve_best_model 2>/dev/null)"
-assert_eq "resolve_best_model: expired cache re-probes" "gpt-5.6-sol" "$_out"
+assert_eq "resolve_best_model: expired cache re-probes" "gpt-6-astra" "$_out"
 CODEX_YOLO_MODEL_CACHE_TTL=86400
 
 # A cached model that is no longer in the candidate list is discarded —
 # changing CODEX_YOLO_MODEL_CANDIDATES takes effect immediately
 rm -f "$_rbm_tmp/model-cache"
-_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
-resolve_best_model >/dev/null 2>&1   # caches gpt-5.6-sol
-CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-terra gpt-5.5"
+_RBM_AVAILABLE="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
+resolve_best_model >/dev/null 2>&1   # caches gpt-6-astra
+CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
 _out="$(resolve_best_model 2>/dev/null)"
-assert_eq "resolve_best_model: cached model outside candidates re-probes" "gpt-5.6-terra" "$_out"
-CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-5.6-terra gpt-5.5"
+assert_eq "resolve_best_model: cached model outside candidates re-probes" "gpt-5.6-sol" "$_out"
+CODEX_YOLO_MODEL_CANDIDATES="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
+
+# Reordering the same candidates invalidates the cache even though its winner
+# remains in the list, allowing a newly preferred model to win immediately.
+_RBM_AVAILABLE="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
+resolve_best_model >/dev/null 2>&1   # re-caches Astra under the full list
+CODEX_YOLO_MODEL_CANDIDATES="gpt-5.6-sol gpt-6-astra gpt-5.6-terra gpt-5.6-luna gpt-5.5"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: reordered candidates invalidate cache" "gpt-5.6-sol" "$_out"
+CODEX_YOLO_MODEL_CANDIDATES="gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5"
+
+# One-line caches from older codex-yolo versions have no candidate fingerprint
+# and are re-probed once under the new cache format.
+printf '%s\n' 'gpt-6-astra' > "$_rbm_tmp/model-cache"
+_RBM_AVAILABLE="gpt-5.6-sol gpt-5.6-terra"
+_out="$(resolve_best_model 2>/dev/null)"
+assert_eq "resolve_best_model: legacy cache is refreshed" "gpt-5.6-sol" "$_out"
+
+assert_eq "compatible effort: Ultra stays enabled for Astra" "ultra" \
+    "$(codex_yolo_compatible_effort gpt-6-astra ultra)"
+assert_eq "compatible effort: Luna caps default Ultra at max" "max" \
+    "$(codex_yolo_compatible_effort gpt-5.6-luna ultra)"
+assert_eq "compatible effort: GPT-5.5 caps default Ultra at xhigh" "xhigh" \
+    "$(codex_yolo_compatible_effort gpt-5.5 ultra)"
+assert_eq "compatible effort: Codex Spark caps default Ultra at xhigh" "xhigh" \
+    "$(codex_yolo_compatible_effort gpt-5.3-codex-spark ultra)"
 
 rm -rf "$_rbm_tmp"
 unset _RBM_AVAILABLE
@@ -5381,11 +5430,29 @@ _test_install_helper_rejects_unknown_release_asset() {
     ! codex_release_asset_name FreeBSD x86_64 >/dev/null
 }
 
-_test_install_helper_default_codex_pin() (
+_test_install_helper_default_codex_latest() (
     unset CODEX_YOLO_CODEX_VERSION
-    [[ "$(codex_target_tag)" == "rust-v0.149.1" ]] &&
-        [[ "$(codex_target_version)" == "0.149.1" ]] &&
-        [[ "$(codex_target_npm_package)" == "@openai/codex@0.149.1" ]]
+    codex_latest_stable_tag() { printf '%s\n' 'rust-v9.9.9'; }
+    [[ "$(codex_target_tag)" == "rust-v9.9.9" ]] &&
+        [[ "$(codex_target_version)" == "9.9.9" ]] &&
+        [[ "$(codex_target_npm_package)" == "@openai/codex@latest" ]]
+)
+
+_test_install_helper_parses_latest_codex_redirect() (
+    curl() {
+        printf '%s\r\n' \
+            'HTTP/2 302' \
+            'Location: https://github.com/openai/codex/releases/tag/rust-v9.9.9'
+    }
+    [[ "$(codex_latest_stable_tag)" == "rust-v9.9.9" ]]
+)
+
+_test_install_helper_offline_latest_falls_back_cleanly() (
+    unset CODEX_YOLO_CODEX_VERSION
+    codex_latest_stable_tag() { return 1; }
+    [[ -z "$(codex_target_tag)" ]] &&
+        [[ -z "$(codex_target_version)" ]] &&
+        [[ "$(codex_target_npm_package)" == "@openai/codex@latest" ]]
 )
 
 _test_install_helper_codex_pin_override() (
@@ -5393,6 +5460,97 @@ _test_install_helper_codex_pin_override() (
     [[ "$(codex_target_tag)" == "rust-v9.8.7" ]] &&
         [[ "$(codex_target_version)" == "9.8.7" ]] &&
         [[ "$(codex_target_npm_package)" == "@openai/codex@9.8.7" ]]
+)
+
+_test_install_helper_restores_cli_when_host_install_fails() (
+    local fake_bin archive_output extract_dir
+    fake_bin="$(mktemp -d)"
+    trap 'rm -rf "$fake_bin"' EXIT
+    printf '%s\n' '#!/usr/bin/env bash' \
+        '[[ "${1:-}" == "--version" ]] && { echo "codex-cli 1.2.3"; exit 0; }' \
+        'exit 1' > "$fake_bin/codex"
+    chmod +x "$fake_bin/codex"
+
+    BIN_DIR="$fake_bin"
+    IS_TERMUX=0
+    OS="Linux"
+    CODEX_YOLO_CODEX_VERSION="rust-v9.8.7"
+
+    info() { :; }
+    warn() { :; }
+    codex_cli_works() { return 0; }
+    install_codex_release_code_mode_host() { return 1; }
+    curl() {
+        while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "-o" ]]; then
+                archive_output="$2"
+                shift 2
+            else
+                shift
+            fi
+        done
+        : > "$archive_output"
+    }
+    tar() {
+        while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "-C" ]]; then
+                extract_dir="$2"
+                shift 2
+            else
+                shift
+            fi
+        done
+        printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
+            > "$extract_dir/$(codex_release_asset_name "$OS" "$(uname -m)")"
+    }
+
+    ! install_codex_release_binary &&
+        [[ "$("$fake_bin/codex" --version)" == "codex-cli 1.2.3" ]]
+)
+
+_test_install_helper_latest_redirect_discards_broken_cli() (
+    local fake_bin archive_output extract_dir download_url
+    fake_bin="$(mktemp -d)"
+    trap 'rm -rf "$fake_bin"' EXIT
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fake_bin/codex"
+    chmod +x "$fake_bin/codex"
+
+    BIN_DIR="$fake_bin"
+    IS_TERMUX=0
+    OS="Linux"
+    unset CODEX_YOLO_CODEX_VERSION
+
+    info() { :; }
+    warn() { :; }
+    codex_latest_stable_tag() { return 1; }
+    codex_cli_works() { return 0; }
+    install_codex_release_code_mode_host() { return 1; }
+    curl() {
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o) archive_output="$2"; shift 2 ;;
+                https://*) download_url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        : > "$archive_output"
+    }
+    tar() {
+        while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "-C" ]]; then
+                extract_dir="$2"
+                shift 2
+            else
+                shift
+            fi
+        done
+        printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
+            > "$extract_dir/$(codex_release_asset_name "$OS" "$(uname -m)")"
+    }
+
+    ! install_codex_release_binary &&
+        [[ ! -e "$fake_bin/codex" ]] &&
+        [[ "$download_url" == "https://github.com/openai/codex/releases/latest/download/$(codex_release_asset_name "$OS" "$(uname -m)").tar.gz" ]]
 )
 
 assert_ok "install helper: missing codex needs install" _test_install_helper_missing_codex_needs_install
@@ -5405,8 +5563,12 @@ assert_ok "install helper: Linux x64 release asset" _test_install_helper_linux_x
 assert_ok "install helper: Linux arm64 release asset" _test_install_helper_linux_arm64_release_asset
 assert_ok "install helper: macOS arm64 release asset" _test_install_helper_macos_arm64_release_asset
 assert_ok "install helper: unknown release asset rejected" _test_install_helper_rejects_unknown_release_asset
-assert_ok "install helper: Codex defaults to pinned 0.149.1" _test_install_helper_default_codex_pin
+assert_ok "install helper: Codex defaults to latest stable" _test_install_helper_default_codex_latest
+assert_ok "install helper: parses latest stable release redirect" _test_install_helper_parses_latest_codex_redirect
+assert_ok "install helper: offline latest resolution falls back cleanly" _test_install_helper_offline_latest_falls_back_cleanly
 assert_ok "install helper: Codex pin can be overridden" _test_install_helper_codex_pin_override
+assert_ok "install helper: failed host install restores prior CLI" _test_install_helper_restores_cli_when_host_install_fails
+assert_ok "install helper: latest redirect path discards a broken prior CLI" _test_install_helper_latest_redirect_discards_broken_cli
 
 # check_prereqs — tmux and codex should be available in test environment
 assert_ok "check_prereqs: passes when tmux and codex are available" check_prereqs
@@ -5480,9 +5642,46 @@ _test_help_sandbox_options() {
     output="$(bash "$SCRIPT_DIR/codex-yolo" --help 2>&1)"
     [[ "$output" == *"--no-codex-sandbox"* ]] && \
     [[ "$output" == *"--force-codex-sandbox"* ]] && \
-    [[ "$output" == *"--permissions"* ]]
+    [[ "$output" == *"--permissions"* ]] && \
+    [[ "$output" == *"Default: ultra"* ]] && \
+    [[ "$output" == *"gpt-6-astra"* ]]
 }
 assert_ok "launcher: --help shows Codex sandbox options" _test_help_sandbox_options
+
+_test_launcher_accepts_ultra_effort() {
+    local output
+    output="$(bash "$SCRIPT_DIR/codex-yolo" --effort ultra \
+        --dir /nonexistent/codex-yolo-ultra-test "task" 2>&1 || true)"
+    [[ "$output" == *"Working directory does not exist"* ]] &&
+        [[ "$output" != *"Unknown effort level"* ]]
+}
+assert_ok "launcher: accepts ultra reasoning effort" _test_launcher_accepts_ultra_effort
+
+_test_launcher_rejects_incompatible_explicit_ultra() {
+    local output
+    output="$(bash "$SCRIPT_DIR/codex-yolo" --model gpt-5.5 --effort ultra \
+        --dir /nonexistent/codex-yolo-ultra-test "task" 2>&1 || true)"
+    [[ "$output" == *"gpt-5.5 does not support reasoning effort 'ultra'"* ]] &&
+        [[ "$output" != *"Working directory does not exist"* ]]
+}
+assert_ok "launcher: rejects explicit Ultra for GPT-5.5 before launch setup" \
+    _test_launcher_rejects_incompatible_explicit_ultra
+
+_test_launcher_rejects_auto_gpt55_with_explicit_ultra() (
+    local fake_home output
+    fake_home="$(mktemp -d)"
+    trap 'rm -rf "$fake_home"' EXIT
+    mkdir -p "$fake_home/.codex-yolo"
+    printf '%s\n%s\n' 'gpt-5.5' 'gpt-5.5' > "$fake_home/.codex-yolo/model-cache"
+
+    output="$(HOME="$fake_home" CODEX_YOLO_MODEL_CANDIDATES=gpt-5.5 \
+        CODEX_YOLO_NO_BELL=1 bash "$SCRIPT_DIR/codex-yolo" \
+        --effort ultra --no-codex-sandbox --permissions full-access \
+        --dir "$SCRIPT_DIR" "task" 2>&1 || true)"
+    [[ "$output" == *"gpt-5.5 does not support reasoning effort 'ultra'"* ]]
+)
+assert_ok "launcher: rejects explicit Ultra after auto-selecting GPT-5.5" \
+    _test_launcher_rejects_auto_gpt55_with_explicit_ultra
 
 _test_tmux_run_reuses_current_named_server() (
     local socket_name="codex-yolo-named-test-$$-$RANDOM"
@@ -5574,7 +5773,9 @@ _test_no_args() {
     local fake_home
     fake_home="$(mktemp -d)"
     mkdir -p "$fake_home/.codex-yolo"
-    echo "gpt-5.5" > "$fake_home/.codex-yolo/model-cache"
+    printf '%s\n%s\n' 'gpt-5.6-sol' \
+        'gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5' \
+        > "$fake_home/.codex-yolo/model-cache"
     # Unset TMUX so the launcher uses "tmux attach" (which harmlessly fails
     # when stdout is redirected) instead of "tmux switch-client" (which would
     # yank the user's current tmux client to the new session).

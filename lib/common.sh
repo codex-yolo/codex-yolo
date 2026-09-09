@@ -71,7 +71,7 @@ check_prereqs() {
 # one-shot `codex exec` call, and the winner is cached so later launches skip
 # the probe. Probing beats reading the local model catalog — the catalog lists
 # what exists, not what this account/plan is currently allowed to use.
-CODEX_YOLO_MODEL_CANDIDATES="${CODEX_YOLO_MODEL_CANDIDATES:-gpt-5.6-sol gpt-5.6-terra gpt-5.5}"
+CODEX_YOLO_MODEL_CANDIDATES="${CODEX_YOLO_MODEL_CANDIDATES:-gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5}"
 CODEX_YOLO_MODEL_CACHE_TTL="${CODEX_YOLO_MODEL_CACHE_TTL:-86400}"
 CODEX_YOLO_MODEL_PROBE_TIMEOUT="${CODEX_YOLO_MODEL_PROBE_TIMEOUT:-60}"
 
@@ -109,14 +109,16 @@ resolve_best_model() {
     now="$(date +%s)"
 
     if [[ -f "$cache" ]]; then
-        local cached mtime age
+        local cached cached_candidates mtime age
         cached="$(head -1 "$cache" 2>/dev/null | tr -d '[:space:]')"
+        cached_candidates="$(sed -n '2p' "$cache" 2>/dev/null)"
         mtime="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)"
         age=$(( now - mtime ))
-        # A cached winner is only valid while it is still one of the current
-        # candidates — otherwise a changed CODEX_YOLO_MODEL_CANDIDATES would
-        # be silently ignored until the TTL expires.
+        # Cache the candidate ordering as well as the winner. This invalidates
+        # old one-line caches and makes a newly preferred model take effect
+        # immediately instead of waiting for the TTL to expire.
         if [[ -n "$cached" ]] && (( age >= 0 && age < CODEX_YOLO_MODEL_CACHE_TTL )) \
+           && [[ "$cached_candidates" == "$CODEX_YOLO_MODEL_CANDIDATES" ]] \
            && [[ " $CODEX_YOLO_MODEL_CANDIDATES " == *" $cached "* ]]; then
             echo "$cached"
             return 0
@@ -128,7 +130,7 @@ resolve_best_model() {
         log_info "Probing model availability: $m"
         if codex_yolo_probe_model "$m"; then
             mkdir -p "$(dirname "$cache")" 2>/dev/null || true
-            printf '%s\n' "$m" > "$cache" 2>/dev/null || true
+            printf '%s\n%s\n' "$m" "$CODEX_YOLO_MODEL_CANDIDATES" > "$cache" 2>/dev/null || true
             echo "$m"
             return 0
         fi
@@ -139,10 +141,28 @@ resolve_best_model() {
     return 0
 }
 
+# Return an effort the selected model supports. The launcher only applies this
+# compatibility fallback when the effort came from its default; an explicit
+# incompatible -e/--effort is rejected instead.
+codex_yolo_compatible_effort() {
+    local model="${1:-}" effort="${2:-}"
+
+    case "$model:$effort" in
+        gpt-5.6-luna:ultra)                      printf '%s\n' 'max' ;;
+        gpt-5.5:ultra|gpt-5.5:max|\
+        gpt-5.4:ultra|gpt-5.4:max|\
+        gpt-5.4-mini:ultra|gpt-5.4-mini:max|\
+        gpt-5.3-codex-spark:ultra|gpt-5.3-codex-spark:max|\
+        gpt-5.3-codex:ultra|gpt-5.3-codex:max|\
+        gpt-5.2:ultra|gpt-5.2:max)               printf '%s\n' 'xhigh' ;;
+        *)                                       printf '%s\n' "$effort" ;;
+    esac
+}
+
 # Render the -c override that sets the reasoning effort for an agent command.
 # Codex has no dedicated effort flag; the model_reasoning_effort config key is
-# the supported knob (unknown values are not fatal — Codex falls back to the
-# model's default — so validation in the launcher only warns).
+# the supported knob. The launcher validates known values and its known model
+# compatibility fallback before it constructs a command.
 codex_yolo_effort_config_arg() {
     local effort="${1:-}"
     [[ -n "$effort" ]] || return 0

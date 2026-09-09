@@ -17,8 +17,8 @@ jobs:
 
       - name: Configure git for tests
         run: |
-          git config --global user.name "CI"
-          git config --global user.email "ci@test"
+          git config --global user.name "dkozlov"
+          git config --global user.email "dmitry.f.kozlov@gmail.com"
 
       - name: Create codex CLI stub
         run: |

@@ -20,12 +20,13 @@ Options:
   Command network access: enabled inside the workspace-write sandbox
   -s, --session NAME    Custom tmux session name (default: codex-yolo-<timestamp>)
   -d, --dir PATH        Working directory for agents (default: current directory)
-  -m, --model MODEL     Model to use (e.g., gpt-5.6-sol, gpt-5.5).
+  -m, --model MODEL     Model to use (e.g., gpt-6-astra, gpt-5.6-sol).
                         Default: best available model, probed automatically
-                        (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5) and cached for 24h
+                        (Astra → Sol → Terra → Luna → GPT-5.5), cached for 24h
   -e, --effort LEVEL    Reasoning effort for each agent
-                          (minimal|low|medium|high|xhigh|max, or 'none' to
-                        leave Codex's configured default). Default: xhigh
+                        (minimal|low|medium|high|xhigh|max|ultra, or 'none' to
+                        leave Codex's configured default). Default: ultra;
+                        compatibility fallbacks: Luna max, GPT-5.5 xhigh
   -p, --poll SECONDS    Approver poll interval (default: 0.3)
   -f, --file FILE       Read a multiline prompt from a text file
   -c, --command STRING  Slash command to run in the control pane after launch
@@ -248,7 +249,9 @@ codex_yolo_inject_control_command() {
 }
 
 main() {
-    local session_name="" work_dir="" model="" effort="xhigh" poll_interval="0.3" resume=0 prompt_file=""
+    local session_name="" work_dir="" model="" effort="ultra" poll_interval="0.3" resume=0 prompt_file=""
+    local effort_explicit=0
+    local compatible_effort=""
     local worktree_mode=0 base_branch="" no_merge=0 no_cleanup=0 conflict_poll="5"
     local codex_sandbox_policy="${CODEX_YOLO_CODEX_SANDBOX:-auto}"
     local codex_permissions_policy="${CODEX_YOLO_PERMISSIONS:-auto}"
@@ -261,7 +264,7 @@ main() {
             -s|--session)  session_name="$2"; shift 2 ;;
             -d|--dir)      work_dir="$2"; shift 2 ;;
             -m|--model)    model="$2"; shift 2 ;;
-            -e|--effort)   effort="$2"; shift 2 ;;
+            -e|--effort)   effort="$2"; effort_explicit=1; shift 2 ;;
             -p|--poll)     poll_interval="$2"; shift 2 ;;
             -f|--file)     prompt_file="$2"; shift 2 ;;
             -c|--command)
@@ -308,12 +311,27 @@ main() {
         effort=""
     elif [[ -n "$effort" ]]; then
         case "$effort" in
-            minimal|low|medium|high|xhigh|max) ;;
+            minimal|low|medium|high|xhigh|max|ultra) ;;
             *)
-                log_error "Unknown effort level: $effort (expected minimal|low|medium|high|xhigh|max, or none)"
+                log_error "Unknown effort level: $effort (expected minimal|low|medium|high|xhigh|max|ultra, or none)"
                 exit 1
                 ;;
         esac
+    fi
+
+    # Validate an explicitly selected model/effort pair before worktree setup
+    # or any other stateful launch work. A default Ultra request may be capped
+    # for a known older model, but an explicit -e choice is never rewritten.
+    if [[ -n "$model" && -n "$effort" ]]; then
+        compatible_effort="$(codex_yolo_compatible_effort "$model" "$effort")"
+        if [[ "$compatible_effort" != "$effort" ]]; then
+            if (( effort_explicit )); then
+                log_error "$model does not support reasoning effort '$effort' (use '$compatible_effort')"
+                exit 1
+            fi
+            log_warn "$model does not support the default '$effort' effort; using '$compatible_effort'"
+            effort="$compatible_effort"
+        fi
     fi
 
     # Handle --resume
@@ -373,7 +391,7 @@ main() {
     configure_codex_permissions "$codex_permissions_policy" || exit 1
     export CODEX_YOLO_NETWORK_ACCESS
 
-    # ── worktree setup ───────────────────────────────────────────────────────
+    # ── worktree validation ──────────────────────────────────────────────────
     if (( worktree_mode )); then
         source "$SCRIPT_DIR/lib/worktree-manager.sh"
 
@@ -390,13 +408,10 @@ main() {
         fi
 
         base_branch="${base_branch:-$(wt_current_branch "$work_dir")}"
-        log_info "Creating ${#tasks[@]} worktrees from branch: $base_branch"
-
-        wt_create_all "$work_dir" "$SESSION_NAME" "$base_branch" "${#tasks[@]}" || exit 1
     fi
 
     # No -m/--model given: pick the best model the account can actually use
-    # (gpt-5.6-sol → gpt-5.6-terra → gpt-5.5, probed and cached — see
+    # (Astra → Sol → Terra → Luna → GPT-5.5, probed and cached — see
     # common.sh). Runs after every cheap validation so bad invocations fail
     # fast instead of paying a model probe first.
     if [[ -z "$model" ]]; then
@@ -404,6 +419,34 @@ main() {
         if [[ -n "$model" ]]; then
             log_info "Auto-selected model: $model (override with -m/--model)"
         fi
+    fi
+
+    # Ultra is the normal default. Keep non-Ultra fallback models usable at
+    # their supported maximum after automatic model selection.
+    if [[ -n "$model" && -n "$effort" ]]; then
+        compatible_effort="$(codex_yolo_compatible_effort "$model" "$effort")"
+        if [[ "$compatible_effort" != "$effort" ]]; then
+            if (( effort_explicit )); then
+                log_error "$model does not support reasoning effort '$effort' (use '$compatible_effort')"
+                exit 1
+            fi
+            log_warn "$model does not support the default '$effort' effort; using '$compatible_effort'"
+            effort="$compatible_effort"
+        fi
+    elif [[ -z "$model" && "$effort" == "ultra" ]] && (( ! effort_explicit )); then
+        # If every availability probe failed (including when offline), neither
+        # the model nor its effort capabilities are known. Avoid forcing an
+        # override that could make the configured fallback model reject launch.
+        log_warn "Could not verify an Ultra-capable model; using Codex's configured model and effort"
+        effort=""
+    fi
+
+    # ── worktree creation ────────────────────────────────────────────────────
+    # Resolve model/effort compatibility before creating persistent worktrees,
+    # so an invalid explicit pair cannot leave partially initialized state.
+    if (( worktree_mode )); then
+        log_info "Creating ${#tasks[@]} worktrees from branch: $base_branch"
+        wt_create_all "$work_dir" "$SESSION_NAME" "$base_branch" "${#tasks[@]}" || exit 1
     fi
 
     # Truncate audit log for this run
