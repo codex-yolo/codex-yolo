@@ -281,15 +281,26 @@ sessions outside `codex-yolo`. Set `CODEX_YOLO_NETWORK_ACCESS=0` or pass
 `codex-yolo` also configures a Codex `Stop` lifecycle hook in `~/.codex/config.toml`
 that rings the terminal bell when an agent finishes its turn, so you get an
 audible cue once the approver has cleared the prompts and control returns to you.
-On Codex `>=0.136.0`, a newly-added hook is gated behind a startup "Hooks need
-review" trust modal; `codex-yolo` pre-trusts its own bell hook deterministically
-(by the stable hash Codex derives from the hook definition) and the control pane
-also clears the modal at startup if it appears, so the bell runs without manual
-review. Any pre-existing `hooks.Stop` configuration is left untouched. Opt out of
-the bell entirely with `CODEX_YOLO_NO_BELL=1`.
+The bell is written only to `/dev/tty`; stdout always contains the valid hook
+result `{}`. If there is no controlling terminal, the hook succeeds without
+ringing. This prevents `hook returned invalid stop hook JSON output` errors.
+On the next launch, the exact old bell command emitted by codex-yolo is repaired
+in place. Custom Stop hooks and existing trust/disabled state are preserved.
+The changed hook enters Codex's normal hook review; the launcher does not write a
+new bell trust hash. The existing control-pane startup hook-review policy still
+applies. Configurations containing multiline TOML strings are left
+untouched by this conservative migration and receive a manual-update notice.
+Set the Stop hook command to the following if updating it manually:
 
-A second lifecycle hook — `hooks.PermissionRequest`, installed and pre-trusted
-the same way — records every Codex approval dialog as a per-pane marker file in
+```toml
+command = '{ printf "\a" > /dev/tty; } 2>/dev/null || :; printf "{}\n"'
+```
+
+Set `CODEX_YOLO_NO_BELL=1` to skip bell setup and migration. This does not remove
+an already installed hook; disable or remove that hook in Codex if desired.
+
+A second lifecycle hook — `hooks.PermissionRequest`, retaining its existing
+installation and pre-trust behavior — records every Codex approval dialog as a per-pane marker file in
 `<audit-log>.waiting/`, so the approver daemon can recognize dialogs rendered
 **off-screen** (see "Hidden-prompt rails" below). The hook command is static:
 the session-specific marker directory comes from the `CODEX_YOLO_WAITING_DIR`
@@ -428,7 +439,7 @@ The test suite covers:
 - Managed-requirements-compatible permission construction, including the safe default, explicit Full Access, and no-sandbox behavior
 - Cooldown logic, the static-pane send cap, command construction (model/effort/marker-dir plumbing), audit logging
 - Best-model auto-selection (probe order, caching, TTL and candidate-list invalidation)
-- Turn-complete bell and PermissionRequest marker hook configuration and pre-trust (and the startup hook-review modal handling)
+- Turn-complete bell JSON output, legacy migration and trust preservation; PermissionRequest marker configuration and pre-trust
 - Hidden-prompt marker handling (freshness, blind-answer gating, composer/copy-mode/stale-marker safety)
 - End-to-end integration tests using real tmux sessions, including the nudge → blind-Enter path and the duplicate-daemon lock
 - Concurrent daemon isolation (no crosstalk between sessions)
@@ -444,7 +455,7 @@ The test suite covers:
 - **Comprehensive detection logic** — Handles all six Codex CLI permission prompt types plus MCP elicitation, the `Replace goal?` confirmation, and `(Recommended)` question menus, using a multi-signal approach that minimizes false positives; the approval key always lands on the approval option even when the selection was moved.
 - **Best-model auto-selection** — Without `-m/--model`, probes for the most capable model your account can use (`gpt-6-astra` → `gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.6-luna` → `gpt-5.5`), caches the winner for 24h, and runs Ultra-capable models at `ultra` reasoning effort by default (`-e/--effort` to override; Luna falls back to `max` and GPT-5.5 to `xhigh`).
 - **Off-screen dialog handling** — A pre-trusted Codex `PermissionRequest` hook records approval dialogs as per-pane markers, so dialogs rendered below the viewport are revealed by repaint nudges or answered blind under strict safety gates.
-- **Turn-complete bell** — Configures (and pre-trusts) a Codex `Stop` hook so the terminal bell rings when an agent finishes its turn; opt out with `CODEX_YOLO_NO_BELL=1`.
+- **Turn-complete bell** — Configures a Codex `Stop` hook with terminal-only bell output and a valid JSON result, and repairs the older generated command; skip setup/migration with `CODEX_YOLO_NO_BELL=1`.
 - **Reliability and traceability** — Per-pane cooldowns, a static-pane send cap, a duplicate-daemon lock, detailed audit logging, and an extensive test suite emphasize reliability and traceability.
 - **No CLI patching or containerization** — Works entirely at the terminal level without modifying the Codex binary or wrapping it in containers.
 

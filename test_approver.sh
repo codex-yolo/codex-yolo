@@ -4874,7 +4874,7 @@ assert_ok "ensure_codex_config: inserts status line into existing TUI table" _te
 assert_ok "ensure_codex_config: preserves existing TUI status line" _test_config_preserves_existing_status_line
 
 ###############################################################################
-#              STOP BELL HOOK — install + pre-trust (Codex >=0.136)          #
+#              STOP BELL HOOK — JSON output + explicit review             #
 ###############################################################################
 
 section "ensure_codex_config — Stop bell hook"
@@ -4888,71 +4888,58 @@ _test_bell_installed() {
     [[ "$content" == *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]]
 }
 
-# The bell must be pre-trusted (trusted_hash present) so Codex >=0.136 runs it
-# without the interactive "Hooks need review" startup modal.
-_test_bell_pretrusted() {
+# New and changed commands must use Codex's review flow. PermissionRequest's
+# existing behavior is independent, so identify Stop keys rather than all hashes.
+_test_bell_requires_review() {
     local fake_home; fake_home="$(mktemp -d)"
-    HOME="$fake_home" ensure_codex_config 2>/dev/null
-    local cfg="$fake_home/.codex/config.toml" content
-    content="$(cat "$cfg")"
-    rm -rf "$fake_home"
-    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]] && \
-    [[ "$content" == *"[hooks.state.\"$cfg:stop:0:0\"]"* ]]
-}
-
-# The trust key must embed THIS config's absolute path (the hash is constant,
-# the key is path-specific), or Codex would re-prompt.
-_test_bell_trust_key_uses_config_path() {
-    local fake_home; fake_home="$(mktemp -d)"
-    HOME="$fake_home" ensure_codex_config 2>/dev/null
-    local cfg="$fake_home/.codex/config.toml"
-    local result=1
-    grep -qF "[hooks.state.\"$cfg:stop:0:0\"]" "$cfg" && result=0
-    rm -rf "$fake_home"
-    return $result
-}
-
-# Running twice must not duplicate the hook or the trust entry. (The config
-# carries two trusted hashes total: the bell's and the permission-marker
-# hook's — each exactly once.)
-_test_bell_idempotent() {
-    local fake_home; fake_home="$(mktemp -d)"
-    HOME="$fake_home" ensure_codex_config 2>/dev/null
-    HOME="$fake_home" ensure_codex_config 2>/dev/null
-    local cfg="$fake_home/.codex/config.toml" hooks bell_trust perm_trust
-    hooks="$(grep -c '^\[\[hooks.Stop\]\]$' "$cfg")"
-    bell_trust="$(grep -c "$CODEX_YOLO_STOP_BELL_TRUSTED_HASH" "$cfg")"
-    perm_trust="$(grep -c "$CODEX_YOLO_PERMISSION_HOOK_TRUSTED_HASH" "$cfg")"
-    rm -rf "$fake_home"
-    [[ "$hooks" == "1" && "$bell_trust" == "1" && "$perm_trust" == "1" ]]
-}
-
-# Upgrade path: config already has our bell hook but no trust entry → the next
-# run pre-trusts it (so existing installs become active without a modal).
-_test_bell_pretrusts_existing_untrusted_hook() {
-    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
-    {
-        printf '# managed by codex-yolo\n\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\n'
-        printf "type = \"command\"\ncommand = '%s'\ntimeout = 30\n" "$CODEX_YOLO_STOP_BELL_COMMAND"
-    } > "$fake_home/.codex/config.toml"
     HOME="$fake_home" ensure_codex_config 2>/dev/null
     local content; content="$(cat "$fake_home/.codex/config.toml")"
     rm -rf "$fake_home"
-    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+    [[ "$content" != *":stop:"* ]]
 }
 
-# CODEX_YOLO_NO_BELL=1 opts out entirely: no hook, no trust entry.
+_test_bell_idempotent() {
+    local fake_home; fake_home="$(mktemp -d)"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    cp "$fake_home/.codex/config.toml" "$fake_home/before"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local result=0
+    cmp -s "$fake_home/before" "$fake_home/.codex/config.toml" || result=1
+    rm -rf "$fake_home"
+    return "$result"
+}
+
+_test_bell_existing_untrusted_stays_untrusted() {
+    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
+    codex_yolo_stop_bell_block > "$fake_home/.codex/config.toml"
+    HOME="$fake_home" ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]] && \
+    [[ "$content" != *":stop:"* ]]
+}
+
 _test_bell_opt_out() {
     local fake_home; fake_home="$(mktemp -d)"
     HOME="$fake_home" CODEX_YOLO_NO_BELL=1 ensure_codex_config 2>/dev/null
     local content; content="$(cat "$fake_home/.codex/config.toml")"
     rm -rf "$fake_home"
-    [[ "$content" != *"[[hooks.Stop]]"* ]] && \
-    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+    [[ "$content" != *"[[hooks.Stop]]"* ]] && [[ "$content" != *":stop:"* ]]
 }
 
-# A user's own pre-existing Stop hook is left untouched, and we do NOT inject a
-# trust entry for a hook we don't own (our command isn't present).
+_test_bell_opt_out_preserves_legacy_command() {
+    local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
+    {
+        printf '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n'
+        printf "type = \"command\"\ncommand = '%s'\ntimeout = 30\n" "$CODEX_YOLO_LEGACY_STOP_BELL_COMMAND"
+    } > "$fake_home/.codex/config.toml"
+    HOME="$fake_home" CODEX_YOLO_NO_BELL=1 ensure_codex_config 2>/dev/null
+    local content; content="$(cat "$fake_home/.codex/config.toml")"
+    rm -rf "$fake_home"
+    [[ "$content" == *"$CODEX_YOLO_LEGACY_STOP_BELL_COMMAND"* ]] && \
+    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]]
+}
+
 _test_bell_preserves_foreign_stop_hook() {
     local fake_home; fake_home="$(mktemp -d)"; mkdir -p "$fake_home/.codex"
     cat > "$fake_home/.codex/config.toml" <<'EOF'
@@ -4968,16 +4955,22 @@ EOF
     rm -rf "$fake_home"
     [[ "$content" == *"echo custom"* ]] && \
     [[ "$content" != *"$CODEX_YOLO_STOP_BELL_COMMAND"* ]] && \
-    [[ "$content" != *"$CODEX_YOLO_STOP_BELL_TRUSTED_HASH"* ]]
+    [[ "$content" != *":stop:"* ]]
 }
 
 assert_ok "stop bell: installs hooks.Stop bell hook" _test_bell_installed
-assert_ok "stop bell: pre-trusts the bell hook (no startup modal)" _test_bell_pretrusted
-assert_ok "stop bell: trust key embeds config path" _test_bell_trust_key_uses_config_path
-assert_ok "stop bell: idempotent (no duplicate hook/trust)" _test_bell_idempotent
-assert_ok "stop bell: pre-trusts pre-existing untrusted bell hook" _test_bell_pretrusts_existing_untrusted_hook
+assert_ok "stop bell: new command requires normal hook review" _test_bell_requires_review
+assert_ok "stop bell: idempotent (entire generated config unchanged)" _test_bell_idempotent
+assert_ok "stop bell: existing untrusted command remains untrusted" _test_bell_existing_untrusted_stays_untrusted
 assert_ok "stop bell: CODEX_YOLO_NO_BELL=1 opts out of hook + trust" _test_bell_opt_out
+assert_ok "stop bell: opt-out also skips legacy migration" _test_bell_opt_out_preserves_legacy_command
 assert_ok "stop bell: leaves a foreign Stop hook untrusted/untouched" _test_bell_preserves_foreign_stop_hook
+if command -v python3 >/dev/null 2>&1; then
+    assert_ok "stop bell: exact migration, trust preservation, TOML and tty output" \
+        python3 "$SCRIPT_DIR/test_stop_bell.py"
+else
+    assert_skip "stop bell: exact migration, trust preservation, TOML and tty output" "python3 unavailable"
+fi
 
 ###############################################################################
 #     PERMISSION-MARKER HOOK — install + pre-trust + hook command behavior    #
