@@ -122,7 +122,8 @@ in_cooldown() {
 #   Style C (tool approval): "Approve app tool call?"
 #          with "Run the tool and continue" / "Decline this tool call"
 #   Style D (trust directory): "Do you trust the contents of this directory?"
-#          with "Yes, continue"
+#          with "Yes, continue", or "Trust this folder?" with
+#          "Trust and continue"
 #   Style E (full access): "Enable full access?"
 #          with "Yes, continue anyway" / "Go back"
 #   Style F (network/host): "Allow Codex to" with host access
@@ -154,8 +155,8 @@ detect_prompt() {
     # the header sits above the tail window.
     local signal_window="$tail_content"
 
-    local question_phrases='(Would you like to run|Would you like to make|Allow Codex to|Approve app tool call|Do you trust the contents|Enable full access)'
-    local approval_option_re='(Yes, just this once|Yes, proceed[[:space:]]*\(y\)|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Yes, and allow this host)'
+    local question_phrases='(Would you like to run|Would you like to make|Allow Codex to|Approve app tool call|Do you trust the contents|Trust this folder|Enable full access)'
+    local approval_option_re='(Yes, just this once|Yes, proceed[[:space:]]*\(y\)|Yes, continue|Yes, and don.t ask|Run the tool and continue|Apply full access|Trust and continue|Yes, and allow this host)'
 
     # Primary signal — Question/header phrases that indicate a permission prompt
     if echo "$tail_content" | grep -qiE "$question_phrases"; then
@@ -189,7 +190,7 @@ detect_prompt() {
     # Secondary signal 2: Denial/context option text or contextual phrases
     # NOTE: "following command" / "following edits" are NOT here because they're
     # part of the question header itself and would cause false positives.
-    if echo "$signal_window" | grep -qiE '(No, and tell Codex|Decline this tool call|Go back without|Cancel this|may have side effects|may access external|may modify|untrusted|prompt injection|requires approval|requires confirmation)'; then
+    if echo "$signal_window" | grep -qiE '(No, and tell Codex|Decline this tool call|Go back without|Cancel this|may have side effects|may access external|may modify|untrusted|prompt injection|requires approval|requires confirmation|Folder settings can run code|Continue only if you trust these files|Your trust decision will be saved)'; then
         has_context=1
     fi
 
@@ -622,7 +623,7 @@ approval_key_for_prompt() {
     # Selection marker already on an approval option ("Yes, just this once",
     # "Yes, and don't ask again", "Run the tool and continue", ...) → Enter
     # confirms it.
-    if echo "$tail_content" | grep -qiE '^[[:space:]]*(│[[:space:]]*)?((❯|›)[[:space:]]*|_[[:space:]]+)([0-9]+[.)][[:space:]]*)?(Yes\b|Run the tool|Apply full access)'; then
+    if echo "$tail_content" | grep -qiE '^[[:space:]]*(│[[:space:]]*)?((❯|›)[[:space:]]*|_[[:space:]]+)([0-9]+[.)][[:space:]]*)?(Yes\b|Run the tool|Apply full access|Trust and continue)'; then
         printf '%s\n' "Enter"
         return 0
     fi
@@ -632,7 +633,7 @@ approval_key_for_prompt() {
     if echo "$tail_content" | grep -qE '^[[:space:]]*(│[[:space:]]*)?((❯|›)[[:space:]]*|_[[:space:]]+)[0-9]+[.)]'; then
         local digit
         digit="$(echo "$tail_content" \
-            | grep -iE '^[[:space:]]*(│[[:space:]]*)?(((❯|›)[[:space:]]*|_[[:space:]]+))?[0-9]+[.)][[:space:]]*(Yes\b|Run the tool|Apply full access)' \
+            | grep -iE '^[[:space:]]*(│[[:space:]]*)?(((❯|›)[[:space:]]*|_[[:space:]]+))?[0-9]+[.)][[:space:]]*(Yes\b|Run the tool|Apply full access|Trust and continue)' \
             | head -n 1 | grep -oE '[0-9]+' | head -n 1)"
         if [[ -n "$digit" ]]; then
             printf '%s\n' "$digit"

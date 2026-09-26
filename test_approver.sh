@@ -254,6 +254,24 @@ make_trust_prompt() {
 EOF
 }
 
+# Simulates the current Codex CLI folder-access prompt (0.153.4+).
+make_folder_access_prompt() {
+    cat <<EOF
+Folder access
+/home/user/git/my-project
+
+Trust this folder? Codex can read, edit, and run files here, subject to your
+permission settings. Folder settings can run code automatically, even without
+a model request. Continue only if you trust these files. Your trust decision
+will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+enter continue · esc quit
+EOF
+}
+
 # Simulates Codex CLI full access prompt.
 make_full_access_prompt() {
     cat <<EOF
@@ -462,6 +480,18 @@ assert_eq "Approval key: classic prompt uses Enter" \
 assert_eq "Approval key: current proceed prompt uses y" \
     "y" "$(approval_key_for_prompt "$(make_current_proceed_command_prompt "ls /tmp")")"
 
+assert_eq "Approval key: current folder-access prompt uses Enter" \
+    "Enter" "$(approval_key_for_prompt "$(make_folder_access_prompt)")"
+
+assert_eq "Approval key: folder-access marker moved to Quit → send Trust option number" \
+    "1" "$(approval_key_for_prompt "$(cat <<'PANE'
+  Trust this folder?
+
+  1. Trust and continue
+› 2. Quit
+PANE
+)")"
+
 # The approval must always land on the approval option, even when the
 # selection marker was moved before the daemon started.
 assert_eq "Approval key: marker on numbered Yes → Enter" \
@@ -631,9 +661,19 @@ assert_ok "Trust: minimal" \
 PANE
 )"
 
+assert_ok "Trust: current folder-access prompt" \
+    detect_prompt "$(make_folder_access_prompt)"
+
+assert_fail "Trust: current question in prose without approval option" \
+    detect_prompt "The documentation asks: Trust this folder? Read it carefully."
+
 _out="$(detect_prompt "$(make_trust_prompt)")"
 assert_contains "Trust: pattern includes question" "$_out" "question"
 assert_contains "Trust: pattern includes +approval" "$_out" "+approval"
+
+_out="$(detect_prompt "$(make_folder_access_prompt)")"
+assert_contains "Trust: current pattern includes +approval" "$_out" "+approval"
+assert_contains "Trust: current pattern includes +context" "$_out" "+context"
 
 ###############################################################################
 #                   FULL ACCESS PROMPTS                                        #
